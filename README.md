@@ -53,7 +53,8 @@ The plugin **id** changed (`github-prs` → `githermes`), so the old install mus
 - Disk plugins load **uncompiled**: UI is written with `jsx()`/`jsxs()` calls, no JSX syntax, no build step.
 - Only `@hermes/plugin-sdk`, `react`, and `react/jsx-runtime` are importable.
 - Tailwind classes must already exist in the app's compiled CSS — arbitrary `var()` bracket forms (`bg-[var(--x)]`) are silently dead at runtime. Use the paren shorthand (`text-(--ui-text-tertiary)`) or scoped `<style>` blocks with real theme variables.
-- Large `gh` payloads go through `shBig` / `shJsonBig` (base64 chunks under the gateway stdout cap). Lists are capped at 30 rows by design.
+- Large `gh` payloads go through `shBig` / `shJsonBig`, which move the payload as **hex** (`od -An -v -tx1`), not base64. The gateway runs `shell.exec` stdout through its secret redactor, whose JWT rule (`eyJ[A-Za-z0-9_-]{10,}`) matches base64-encoded JSON — `{"` encodes to `eyJ` at every 3-byte-aligned object boundary — and silently replaces chunks with a mask while still returning exit code 0. That made every list fail to load with no console error. Hex costs 2x the raw bytes (vs base64's 1.33x); the list queries claw ~36% back with a server-side `--jq` projection. Do not switch this back to base64.
+- Lists page from a 30-row window, doubling on **Show more**, with a direct **Load all** jump to the `LIST_LIMIT_CAP` (500) ceiling.
 
 ## Status & contributing
 

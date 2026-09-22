@@ -61,3 +61,19 @@ test('shell: bash is resolved once at registration', () => {
   const register = source.slice(source.indexOf('register(ctx) {'))
   assert.ok(register.includes('resolveBash()'), 'register must start bash resolution')
 })
+
+test('shell: shBig only uses coreutils Git-for-Windows bash actually ships', () => {
+  // shBig runs inside the msys2 bash hop on Windows, so every binary it invokes
+  // must exist there. `od` is POSIX coreutils and ships alongside the `wc` /
+  // `tail` / `tr` / `unlink` this pipeline already relied on. `xxd` does NOT
+  // ship in every Git-for-Windows layout, which is why the hex encode is `od`.
+  const big = source.slice(source.indexOf('async function shBig'), source.indexOf('async function shJsonBig'))
+  const bigCode = big.replace(/\/\/.*$/gm, '') // assert on code, not on the prose explaining it
+  assert.ok(bigCode.includes('od -An -v -tx1'), 'hex encode must use POSIX od')
+  assert.ok(!/\bxxd\b/.test(bigCode), 'xxd is not guaranteed present in Git-for-Windows')
+  assert.ok(!/\bbase64\b/.test(bigCode), 'base64 output collides with the gateway JWT redactor')
+  // The cmd.exe length guard is computed on the base64 of the WHOLE wrapped
+  // command; the shBig wrapper plus the list --jq projections must stay far
+  // under it (measured: ~540 b64 chars for the largest, guard is 6000).
+  assert.ok(source.includes('if (b64.length > 6000)'), 'cmd.exe length guard must stay')
+})
