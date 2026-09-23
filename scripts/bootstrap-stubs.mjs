@@ -51,6 +51,16 @@ export const SelectValue = () => null
 export const Popover = () => null
 export const PopoverTrigger = () => null
 export const PopoverContent = () => null
+export const DropdownMenu = () => null
+export const DropdownMenuTrigger = () => null
+export const DropdownMenuContent = () => null
+export const DropdownMenuItem = () => null
+export const Dialog = () => null
+export const DialogContent = () => null
+export const DialogHeader = () => null
+export const DialogTitle = () => null
+export const DialogFooter = () => null
+export const Checkbox = () => null
 export const Codicon = () => null
 export const icons = {}
 export const cn = (...args) => args.filter(Boolean).join(' ')

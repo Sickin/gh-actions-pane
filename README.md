@@ -1,8 +1,8 @@
-# GitHermes
+# GH Actions Pane
 
-GitHub PRs & Issues as a right workspace pane in [Hermes Desktop](https://hermes-agent.nousresearch.com/docs/user-guide/desktop).
+GitHub PRs & Issues as a right workspace pane in [Hermes Desktop](https://hermes-agent.nousresearch.com/docs/user-guide/desktop) — plus user-defined Actions that route by GitHub label, inspired by [GitKraken Kepler](https://gitkraken.com/kepler)'s Preferred Actions.
 
-> **Community plugin.** GitHermes is an open-source, independent project. It is **not** an official Nous Research product and is not developed or maintained by the Hermes team. It works with Hermes Desktop through its public plugin API.
+> **Community plugin, fork of [githermes](https://github.com/claudioorjunior/githermes).** GH Actions Pane is an open-source, independent project. It is **not** an official Nous Research product and is not developed or maintained by the Hermes team. It works with Hermes Desktop through its public plugin API.
 
 A single-file desktop plugin (`@hermes/plugin-sdk`) that shows your repository's open PRs and issues in a dockable pane — conversation, reviews, commits, checks, files, and in-pane merge — styled after GitHub and themed with Hermes `--ui-*` variables. No backend, no extra token: data comes from the connected `gh` CLI via `host.request('shell.exec')`.
 
@@ -29,6 +29,8 @@ A single-file desktop plugin (`@hermes/plugin-sdk`) that shows your repository's
 - **Commits** — same rail; each row is a `<details>` with lazy-loaded body / `+−` / files; SHA + external link do not toggle
 - **Files** — unified hunks per file, line numbers, theme diff colors, `A/D/M/R` badge; unboxed header, border on the diff body
 - **Issues** — label chips in the label's own color, black/white text via W3C relative luminance
+- **Actions** — user-editable named prompts (Implement, Triage, Diagnose, or your own) run against one issue/PR from its row, in bulk from the list selection, or from the detail toolbar. A split button runs the *resolved* action on click; the chevron offers every other action scoped to that item kind
+- **Label routing** — ordered rules map a GitHub label to an action (e.g. `ready-for-agent` → Implement, `bug` → Diagnose); the first matching label wins, falling back to a per-kind default (Issues / PRs) when nothing matches. Manage actions, rules, and defaults from the gear icon in the pane/page header
 - **Theme** — field surfaces on `--ui-editor-surface-background` (matte/glass inherited from Desktop); cards on `--ui-bg-quaternary`; container queries at `<360` / `<300` / `<240`
 
 ## Requirements
@@ -39,14 +41,14 @@ A single-file desktop plugin (`@hermes/plugin-sdk`) that shows your repository's
 ## Install
 
 ```bash
-hermes plugins install claudioorjunior/githermes --enable
+hermes plugins install chrisbevins/gh-actions-pane --enable
 ```
 
-Or manually: drop this folder into `~/.hermes/plugins/githermes/` (unified package — the desktop half lives at `desktop/plugin.js`), or copy `desktop/plugin.js` to `~/.hermes/desktop-plugins/githermes/plugin.js` (standalone disk door). The app hot-reloads on save.
+Or manually: drop this folder into `~/.hermes/plugins/gh-actions-pane/` (unified package — the desktop half lives at `desktop/plugin.js`), or copy `desktop/plugin.js` to `~/.hermes/desktop-plugins/gh-actions-pane/plugin.js` (standalone disk door). The app hot-reloads on save.
 
-### Upgrading from `github-prs`
+### Upgrading from `githermes` or `github-prs`
 
-The plugin **id** changed (`github-prs` → `githermes`), so the old install must be removed first — delete the old folder (`~/.hermes/desktop-plugins/github-prs/` or `~/.hermes/plugins/github-prs/`), then install fresh. One-time cost: the saved repository in the picker resets (plugin storage is namespaced by id).
+The plugin **id** changed (`github-prs` → `githermes` → `gh-actions-pane`), so an old install must be removed first — delete the old folder (`~/.hermes/desktop-plugins/githermes/`, `~/.hermes/plugins/githermes/`, or the earlier `github-prs` equivalents), then install fresh. One-time cost: the saved repository and Actions settings in the picker reset (plugin storage is namespaced by id).
 
 ## Development notes
 

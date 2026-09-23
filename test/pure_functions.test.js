@@ -58,6 +58,20 @@ import {
   listMoreState,
   buildImplementPlan,
   implementIssues,
+  buildActionPlan,
+  runAction,
+  IMPLEMENT_ACTION,
+  DEFAULT_ACTIONS,
+  DEFAULT_LABEL_RULES,
+  DEFAULT_ACTION_DEFAULTS,
+  normalizeAction,
+  normalizeActions,
+  normalizeLabelRule,
+  normalizeLabelRules,
+  normalizeActionDefaults,
+  findAction,
+  matchLabelRule,
+  resolveActionId,
   issueSelectionKey,
   toggleIssueSelection,
   selectedIssueNumbers,
@@ -112,8 +126,8 @@ test('Issue #12: parsePatch parses unified diff patch into structured row model'
 })
 
 test('parseRemote extracts owner/repo from various git remote URL shapes', () => {
-  assert.equal(parseRemote('https://github.com/claudioorjunior/githermes.git'), 'claudioorjunior/githermes')
-  assert.equal(parseRemote('git@github.com:claudioorjunior/githermes.git'), 'claudioorjunior/githermes')
+  assert.equal(parseRemote('https://github.com/chrisbevins/gh-actions-pane.git'), 'chrisbevins/gh-actions-pane')
+  assert.equal(parseRemote('git@github.com:chrisbevins/gh-actions-pane.git'), 'chrisbevins/gh-actions-pane')
   assert.equal(parseRemote('https://github.com/owner/repo'), 'owner/repo')
   assert.equal(parseRemote(''), null)
   assert.equal(parseRemote(null), null)
@@ -155,7 +169,7 @@ test('resolveTranscriptPr keeps the link when the lookup fails', async () => {
 })
 
 test('Issue #33: formatPrCheckoutCmd returns a runnable gh command', () => {
-  assert.equal(formatPrCheckoutCmd('claudioorjunior/githermes', 33), 'gh pr checkout 33 --repo claudioorjunior/githermes')
+  assert.equal(formatPrCheckoutCmd('chrisbevins/gh-actions-pane', 33), 'gh pr checkout 33 --repo chrisbevins/gh-actions-pane')
 })
 
 test('prStateKey resolves open, draft, merged, closed states', () => {
@@ -196,17 +210,17 @@ test('approvePlan and issuePlan pin confirm text and invalidation wiring', () =>
   const ap = approvePlan('owner/repo', 58)
   assert.equal(ap.confirm, 'Approve PR #58 in owner/repo?')
   assert.deepEqual(ap.invalidate, [
-    ['githermes', 'pr-page', 'owner/repo', '58'],
-    ['githermes', 'pr-conv', 'owner/repo', '58'],
-    ['githermes', 'prs', 'owner/repo'],
+    ['gh-actions-pane', 'pr-page', 'owner/repo', '58'],
+    ['gh-actions-pane', 'pr-conv', 'owner/repo', '58'],
+    ['gh-actions-pane', 'prs', 'owner/repo'],
   ])
 
   const cp = issuePlan('owner/repo', 59, 'OPEN')
   assert.equal(cp.action, 'close')
   assert.equal(cp.confirm, 'Close issue #59 in owner/repo?')
   assert.deepEqual(cp.invalidate, [
-    ['githermes', 'issue-detail', 'owner/repo', '59'],
-    ['githermes', 'issues', 'owner/repo'],
+    ['gh-actions-pane', 'issue-detail', 'owner/repo', '59'],
+    ['gh-actions-pane', 'issues', 'owner/repo'],
   ])
 
   const rp = issuePlan('owner/repo', 59, 'CLOSED')
@@ -544,7 +558,7 @@ test('mdBlocks parses GFM markdown into structured AST blocks', () => {
 
 test('Issue #24: repoOk accepts owner/repo, rejects shell-hostile free text', () => {
   // Valid
-  assert.ok(repoOk('claudioorjunior/githermes'))
+  assert.ok(repoOk('chrisbevins/gh-actions-pane'))
   assert.ok(repoOk('owner.name/repo_name'))
   assert.ok(repoOk('a-b.c_d/efg'))
   assert.ok(repoOk('owner/.'))
@@ -657,17 +671,17 @@ test('buildAssignPlan titles a scratch session, never Bot Chat', () => {
   const plan = buildAssignPlan({
     bot: { name: 'dev' },
     kind: 'pr',
-    repo: 'claudioorjunior/githermes',
+    repo: 'chrisbevins/gh-actions-pane',
     number: 34,
-    url: 'https://github.com/claudioorjunior/githermes/pull/34',
+    url: 'https://github.com/chrisbevins/gh-actions-pane/pull/34',
     title: 'tier polling',
   })
   assert.equal(plan.error, undefined)
   assert.equal(plan.profile, 'dev')
-  assert.equal(plan.title, 'PR claudioorjunior/githermes#34')
+  assert.equal(plan.title, 'PR chrisbevins/gh-actions-pane#34')
   assert.notEqual(plan.title, 'Bot Chat')
   assert.notEqual(plan.title, 'Agent Inbox')
-  assert.match(plan.prompt, /https:\/\/github.com\/claudioorjunior\/githermes\/pull\/34/)
+  assert.match(plan.prompt, /https:\/\/github.com\/chrisbevins\/gh-actions-pane\/pull\/34/)
   assert.match(plan.prompt, /diff|comments/i)
 })
 
@@ -879,13 +893,13 @@ test('parseBehindCount: numeric output is truth, anything else is not behind', (
 
 test('parseCatalogPin: only our own entry with a full SHA counts', () => {
   const sha = '09d5b566da650290dc0d639ea1e77def4bcdab31'
-  const good = { results: [{ name: 'githermes', repo: 'https://github.com/claudioorjunior/githermes', sha }] }
-  assert.equal(parseCatalogPin(good, 'claudioorjunior/githermes'), sha)
+  const good = { results: [{ name: 'gh-actions-pane', repo: 'https://github.com/chrisbevins/gh-actions-pane', sha }] }
+  assert.equal(parseCatalogPin(good, 'chrisbevins/gh-actions-pane'), sha)
   // Wrong repo, short SHA, missing shape: all fall back to the main compare.
-  assert.equal(parseCatalogPin({ results: [{ name: 'githermes', repo: 'https://github.com/evil/fork', sha }] }, 'claudioorjunior/githermes'), null)
-  assert.equal(parseCatalogPin({ results: [{ name: 'githermes', repo: 'https://github.com/claudioorjunior/githermes', sha: '09d5b56' }] }, 'claudioorjunior/githermes'), null)
-  assert.equal(parseCatalogPin({ results: [] }, 'claudioorjunior/githermes'), null)
-  assert.equal(parseCatalogPin(null, 'claudioorjunior/githermes'), null)
+  assert.equal(parseCatalogPin({ results: [{ name: 'gh-actions-pane', repo: 'https://github.com/evil/fork', sha }] }, 'chrisbevins/gh-actions-pane'), null)
+  assert.equal(parseCatalogPin({ results: [{ name: 'gh-actions-pane', repo: 'https://github.com/chrisbevins/gh-actions-pane', sha: '09d5b56' }] }, 'chrisbevins/gh-actions-pane'), null)
+  assert.equal(parseCatalogPin({ results: [] }, 'chrisbevins/gh-actions-pane'), null)
+  assert.equal(parseCatalogPin(null, 'chrisbevins/gh-actions-pane'), null)
 })
 
 test('resolvePinBehind: rollback is not "up to date"', () => {
@@ -1138,6 +1152,145 @@ test('implementIssues refuses a rejected plan and an incomplete session', async 
     () => implementIssues({}, { command: 'implement', arg: 'x', cwd: '/t', title: 'T' }),
     /update hermes desktop/i,
   )
+})
+
+// --- Generic Action engine: user-editable Actions + label -> action routing ---
+
+test('buildActionPlan targets the checked-out repo only when the action requires one', () => {
+  const triage = { id: 'triage', title: 'Triage', command: 'triage', instruction: 'Assess it.', appliesTo: ['issue'], requiresCheckout: false }
+  // requiresCheckout: false must NOT demand a session — Triage can run headless.
+  const plan = buildActionPlan({ action: triage, numbers: [12], repo: 'acme/app', kind: 'issue' })
+  assert.equal(plan.error, undefined)
+  assert.equal(plan.cwd, undefined)
+  assert.equal(plan.command, 'triage')
+  assert.equal(plan.actionId, 'triage')
+  assert.match(plan.arg, /https:\/\/github\.com\/acme\/app\/issues\/12/)
+  assert.match(plan.arg, /Assess it\./)
+  assert.match(plan.arg, /untrusted data/i, 'the shared safety rule must still be appended')
+
+  // requiresCheckout: true DOES demand a session in this exact repo, same as
+  // buildImplementPlan's original behavior.
+  const diagnose = { id: 'diagnose', title: 'Diagnose', command: 'diagnose', instruction: '', appliesTo: ['issue'], requiresCheckout: true }
+  assert.match(buildActionPlan({ action: diagnose, numbers: [1], repo: 'acme/app' }).error, /check.?out|open/i)
+  const ok = buildActionPlan({ action: diagnose, numbers: [1], repo: 'acme/app', sessionRepo: 'acme/app', sessionCwd: '/tmp/app' })
+  assert.equal(ok.cwd, '/tmp/app')
+})
+
+test('buildActionPlan handles PRs with the right URL segment and noun', () => {
+  const review = { id: 'review', title: 'Review', command: 'review', instruction: '', appliesTo: ['pr'], requiresCheckout: false }
+  const plan = buildActionPlan({ action: review, numbers: [9, 3], repo: 'acme/app', kind: 'pr' })
+  assert.match(plan.arg, /https:\/\/github\.com\/acme\/app\/pull\/3/)
+  assert.match(plan.arg, /https:\/\/github\.com\/acme\/app\/pull\/9/)
+  assert.equal(buildActionPlan({ action: review, numbers: [], repo: 'acme/app', kind: 'pr' }).error, 'Select at least one pull request')
+})
+
+test('buildActionPlan refuses a missing action or repo before touching numbers', () => {
+  assert.equal(buildActionPlan({ numbers: [1], repo: 'acme/app' }).error, 'No action selected')
+  assert.match(buildActionPlan({ action: IMPLEMENT_ACTION, numbers: [1], repo: 'not a repo' }).error, /repository/i)
+})
+
+test('buildImplementPlan is a thin wrapper over buildActionPlan with IMPLEMENT_ACTION', () => {
+  // Same contract as before the generic engine existed: pins backward compat.
+  const plan = buildImplementPlan({ numbers: [34, 12], repo: 'acme/app', sessionRepo: 'acme/app', sessionCwd: '/tmp/app' })
+  assert.equal(plan.command, 'implement')
+  assert.equal(plan.title, 'Implement acme/app #12 #34')
+  assert.match(plan.arg, /https:\/\/github\.com\/acme\/app\/issues\/12/)
+})
+
+test('runAction dispatches the skill then submits its expanded message, for any action', async () => {
+  const calls = []
+  const api = {
+    request: async (method, params) => {
+      calls.push({ method, params })
+      if (method === 'session.create') return { session_id: 'rt9', stored_session_id: 'st9' }
+      if (method === 'command.dispatch') return { type: 'skill', message: 'EXPANDED SKILL TEXT' }
+      return {}
+    },
+    openSession: async (id, opts) => { calls.push({ method: 'openSession', id, opts }) },
+  }
+  const triage = { id: 'triage', title: 'Triage', command: 'triage', instruction: '', appliesTo: ['issue'], requiresCheckout: false }
+  const plan = buildActionPlan({ action: triage, numbers: [5], repo: 'acme/app' })
+  const result = await runAction(api, plan)
+  assert.deepEqual(result, { session_id: 'rt9', stored_session_id: 'st9', skillExpanded: true })
+  assert.deepEqual(calls.map(c => c.method), ['session.create', 'session.title', 'openSession', 'command.dispatch', 'prompt.submit'])
+  assert.equal(calls[3].params.name, 'triage')
+  assert.equal(calls[4].params.text, 'EXPANDED SKILL TEXT')
+  // No cwd required for a requiresCheckout:false action.
+  assert.equal(calls[0].params.cwd, undefined)
+})
+
+test('normalizeAction drops malformed entries instead of crashing the pane', () => {
+  assert.equal(normalizeAction(null), null)
+  assert.equal(normalizeAction({}), null)
+  assert.equal(normalizeAction({ id: 'x', title: '', command: 'y' }), null, 'title required')
+  assert.equal(normalizeAction({ id: 'x', title: 'X', command: '' }), null, 'command required')
+  // A leading slash on the command is stripped, not treated as part of it.
+  assert.equal(normalizeAction({ id: 'x', title: 'X', command: '/x' }).command, 'x')
+  // appliesTo defaults to ['issue'] when absent or contains no valid kind.
+  assert.deepEqual(normalizeAction({ id: 'x', title: 'X', command: 'x' }).appliesTo, ['issue'])
+  assert.deepEqual(normalizeAction({ id: 'x', title: 'X', command: 'x', appliesTo: ['bogus'] }).appliesTo, ['issue'])
+  assert.deepEqual(normalizeAction({ id: 'x', title: 'X', command: 'x', appliesTo: ['pr', 'issue'] }).appliesTo, ['pr', 'issue'])
+})
+
+test('normalizeActions dedupes by id, first occurrence wins', () => {
+  const list = normalizeActions([
+    { id: 'a', title: 'First', command: 'a' },
+    { id: 'a', title: 'Second (should be dropped)', command: 'a2' },
+    { id: 'b', title: 'B', command: 'b' },
+    null,
+    { title: 'no id', command: 'x' },
+  ])
+  assert.deepEqual(list.map(a => a.id), ['a', 'b'])
+  assert.equal(list[0].title, 'First')
+})
+
+test('normalizeLabelRule and normalizeLabelRules require both a label and an actionId', () => {
+  assert.equal(normalizeLabelRule({ label: '', actionId: 'x' }), null)
+  assert.equal(normalizeLabelRule({ label: 'bug', actionId: '' }), null)
+  const rule = normalizeLabelRule({ label: 'bug', actionId: 'diagnose' })
+  assert.equal(rule.label, 'bug')
+  assert.equal(rule.actionId, 'diagnose')
+  assert.ok(rule.id)
+  assert.deepEqual(normalizeLabelRules([{ label: 'bug', actionId: 'x' }, null, {}]).length, 1)
+})
+
+test('normalizeActionDefaults tolerates a missing or malformed stored value', () => {
+  assert.deepEqual(normalizeActionDefaults(undefined), { issue: null, pr: null })
+  assert.deepEqual(normalizeActionDefaults([1, 2]), { issue: null, pr: null })
+  assert.deepEqual(normalizeActionDefaults({ issue: 'triage', pr: '  ' }), { issue: 'triage', pr: null })
+})
+
+test('matchLabelRule: first matching label wins, case-insensitively', () => {
+  const rules = [
+    { id: 'r1', label: 'ready-for-agent', actionId: 'implement' },
+    { id: 'r2', label: 'bug', actionId: 'diagnose' },
+  ]
+  assert.equal(matchLabelRule([{ name: 'Bug' }, { name: 'ready-for-agent' }], rules), 'implement', 'rule order wins, not label order')
+  assert.equal(matchLabelRule([{ name: 'BUG' }], rules), 'diagnose')
+  assert.equal(matchLabelRule([{ name: 'unrelated' }], rules), null)
+  assert.equal(matchLabelRule([], rules), null)
+  assert.equal(matchLabelRule(undefined, rules), null)
+  // Plain string labels (not {name} objects) also match.
+  assert.equal(matchLabelRule(['bug'], rules), 'diagnose')
+})
+
+test('resolveActionId: a label rule beats the per-kind default', () => {
+  const rules = DEFAULT_LABEL_RULES
+  const defaults = DEFAULT_ACTION_DEFAULTS
+  assert.equal(resolveActionId({ labels: [{ name: 'ready-for-agent' }], kind: 'issue', rules, defaults }), 'implement')
+  assert.equal(resolveActionId({ labels: [{ name: 'needs-triage' }], kind: 'issue', rules, defaults }), 'triage')
+  assert.equal(resolveActionId({ labels: [{ name: 'bug' }], kind: 'issue', rules, defaults }), 'diagnose')
+  // No matching label: falls through to the per-kind default.
+  assert.equal(resolveActionId({ labels: [], kind: 'issue', rules, defaults }), 'triage')
+  // PRs have no default in DEFAULT_ACTION_DEFAULTS: resolves to null, letting
+  // the caller fall back to "let the user pick" rather than crash.
+  assert.equal(resolveActionId({ labels: [], kind: 'pr', rules, defaults }), null)
+})
+
+test('findAction returns null for an unknown or deleted id, never throws', () => {
+  assert.equal(findAction(DEFAULT_ACTIONS, 'implement')?.title, 'Implement')
+  assert.equal(findAction(DEFAULT_ACTIONS, 'nonexistent'), null)
+  assert.equal(findAction(undefined, 'implement'), null)
 })
 
 test('issue selection is keyed by repo so it survives list growth and refetches', () => {

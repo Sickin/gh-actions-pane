@@ -1,5 +1,5 @@
 /**
- * GitHermes — GitHub PRs & Issues as a right workspace pane.
+ * GH Actions Pane — GitHub PRs & Issues as a right workspace pane.
  * GitHub data via `host.request('shell.exec')` + connected `gh`; Bot assignment via gateway session RPCs. No backend.
  * Session PR: cwd git branch (same join as core review) + transcript URL scan.
  * ponytail: lists page from a 30-row window up to a 500 cap; payloads route through shBig as HEX (base64 collides with the gateway's JWT redactor — see shBig).
@@ -14,6 +14,7 @@ import {
   Button,
   Input,
   Textarea,
+  Checkbox,
   Badge,
   CopyButton,
   StatusDot,
@@ -33,6 +34,15 @@ import {
   Popover,
   PopoverTrigger,
   PopoverContent,
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogFooter,
   Codicon,
   icons,
   cn,
@@ -46,7 +56,7 @@ import {
 import { useState, useEffect, useMemo, useRef } from 'react'
 import { jsx, jsxs, Fragment } from 'react/jsx-runtime'
 
-const ID = 'githermes'
+const ID = 'gh-actions-pane'
 const PANE_ID = `${ID}:pane`
 const REVEAL = 'hermes:pane-toggle-reveal'
 const GITHUB_ROUTE = '/github'
@@ -64,7 +74,7 @@ const POSIX_SHELL = typeof navigator === 'undefined' || !/win/i.test(navigator.p
 const POSIX_PATH = 'PATH=/opt/homebrew/bin:/usr/local/bin:$PATH '
 const GH = `${POSIX_SHELL ? POSIX_PATH : ''}gh`
 const HERMES = `${POSIX_SHELL ? POSIX_PATH : ''}hermes`
-const PLUGIN_NAME = 'githermes'
+const PLUGIN_NAME = 'gh-actions-pane'
 // $HERMES_HOME is expanded by the backend shell (profile-aware); double quotes
 // keep it a single word while still letting the env var through.
 const PLUGIN_LEDGER_PATH = '${HERMES_HOME}/plugins/.install-metadata.json'
@@ -111,6 +121,14 @@ const $botAssignments = atom({})
 // longer see must not be dispatched, and a stale key from another repo must
 // never be read as this repo's issue number.
 const $issueSelection = atom([])
+// Settings overlay visibility — a full-pane state toggle (no Dialog primitive
+// in the SDK), same pattern as AssignToBot's popover, just pane-sized. Split
+// per surface (docked pane vs full page route): they mount independently and
+// simultaneously, so a single shared flag left the OTHER surface stuck open
+// on Settings (or stuck unable to leave it) whenever either one's gear was
+// clicked — looked like "GitHub pane won't leave full screen / won't refresh".
+const $paneActionsSettingsOpen = atom(false)
+const $pageActionsSettingsOpen = atom(false)
 
 // Scoped wrap fix. Radix ScrollArea wraps children in a display:table div
 // (content-measuring hack) that lets content grow wider than the pane instead of
@@ -118,21 +136,21 @@ const $issueSelection = atom([])
 // layout so content reflows to the pane width. Inline style => !important needed.
 // Selectors are prefixed so they can only match inside this pane.
 const PANE_WRAP_CSS = `
-.githermes-pane, .githermes-pane * { box-sizing: border-box; }
-.githermes-pane {
+.gh-actions-pane, .gh-actions-pane * { box-sizing: border-box; }
+.gh-actions-pane {
   width: 100%; max-width: 100%; min-width: 0; overflow: hidden; background: var(--ui-editor-surface-background);
   container-type: inline-size;
 }
-.githermes-pane [data-radix-scroll-area-viewport] > div { display: block !important; min-width: 0 !important; width: 100% !important; }
-.githermes-pane :is(h1, h2, h3, h4, h5, h6, p, li, a, span, code, summary, td, th, blockquote) { max-width: 100%; overflow-wrap: anywhere; word-break: break-word; }
-.githermes-pane pre { max-width: 100%; overflow-x: auto; }
+.gh-actions-pane [data-radix-scroll-area-viewport] > div { display: block !important; min-width: 0 !important; width: 100% !important; }
+.gh-actions-pane :is(h1, h2, h3, h4, h5, h6, p, li, a, span, code, summary, td, th, blockquote) { max-width: 100%; overflow-wrap: anywhere; word-break: break-word; }
+.gh-actions-pane pre { max-width: 100%; overflow-x: auto; }
 /* Runtime plugins need scoped divide color because Tailwind variants are not compiled. */
-.githermes-pane .gh-divide > :not(:last-child) { border-bottom: 1px solid var(--ui-stroke-secondary); }
-.githermes-pane .gh-shell-header {
+.gh-actions-pane .gh-divide > :not(:last-child) { border-bottom: 1px solid var(--ui-stroke-secondary); }
+.gh-actions-pane .gh-shell-header {
   background: var(--ui-editor-surface-background);
   box-shadow: inset 0 -1px var(--ui-stroke-secondary);
 }
-.githermes-pane .gh-empty-icon {
+.gh-actions-pane .gh-empty-icon {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -140,19 +158,19 @@ const PANE_WRAP_CSS = `
   background: var(--ui-bg-quaternary);
   color: var(--ui-text-secondary);
 }
-.githermes-pane .gh-repo-trigger {
+.gh-actions-pane .gh-repo-trigger {
   height: 32px;
   border-radius: 999px;
   background: transparent;
   box-shadow: none;
   border: 1px solid var(--ui-stroke-secondary);
 }
-.githermes-pane .gh-repo-trigger:hover,
-.githermes-pane .gh-repo-trigger[data-state='open'] {
+.gh-actions-pane .gh-repo-trigger:hover,
+.gh-actions-pane .gh-repo-trigger[data-state='open'] {
   background: var(--ui-bg-quinary);
   box-shadow: none;
 }
-/* Unscoped: the picker popover portals outside .githermes-pane, so the
+/* Unscoped: the picker popover portals outside .gh-actions-pane, so the
    gh- prefix alone namespaces these (hover + drop-target affordance).
    Globally visible by construction — keep the gh- prefix unique. */
 .gh-repo-option { cursor: pointer; }
@@ -164,25 +182,25 @@ const PANE_WRAP_CSS = `
   border-top: 2px solid var(--ui-accent);
   margin-top: -2px;
 }
-.githermes-pane .gh-list { display: flex; flex-direction: column; gap: 6px; padding: 8px; }
-.githermes-pane .gh-list-row {
+.gh-actions-pane .gh-list { display: flex; flex-direction: column; gap: 6px; padding: 8px; }
+.gh-actions-pane .gh-list-row {
   border: 1px solid var(--ui-stroke-secondary);
   border-radius: 8px;
   background: var(--ui-bg-quaternary);
   transition: border-color 120ms ease, background-color 120ms ease;
 }
-.githermes-pane .gh-list-row:hover {
+.gh-actions-pane .gh-list-row:hover {
   border-color: color-mix(in srgb, var(--ui-accent) 55%, var(--ui-stroke-secondary));
   background: var(--ui-bg-quinary);
 }
-.githermes-pane .gh-list-row:focus-within { outline: 2px solid var(--ui-accent); outline-offset: 1px; }
-.githermes-pane .gh-row-open:focus-visible { outline: none; }
-.githermes-pane .gh-filter-token { cursor: pointer; }
-.githermes-pane .gh-filter-token:hover { text-decoration: underline; }
-.githermes-pane .gh-filter-token:focus-visible { outline: 2px solid var(--ui-accent); outline-offset: 1px; }
-.githermes-pane .gh-list-title { font-size: 13px; line-height: 18px; font-weight: 600; }
-.githermes-pane .gh-list-heading { color: var(--ui-text-tertiary); letter-spacing: .04em; text-transform: uppercase; }
-.githermes-pane .gh-status-chip {
+.gh-actions-pane .gh-list-row:focus-within { outline: 2px solid var(--ui-accent); outline-offset: 1px; }
+.gh-actions-pane .gh-row-open:focus-visible { outline: none; }
+.gh-actions-pane .gh-filter-token { cursor: pointer; }
+.gh-actions-pane .gh-filter-token:hover { text-decoration: underline; }
+.gh-actions-pane .gh-filter-token:focus-visible { outline: 2px solid var(--ui-accent); outline-offset: 1px; }
+.gh-actions-pane .gh-list-title { font-size: 13px; line-height: 18px; font-weight: 600; }
+.gh-actions-pane .gh-list-heading { color: var(--ui-text-tertiary); letter-spacing: .04em; text-transform: uppercase; }
+.gh-actions-pane .gh-status-chip {
   display: inline-flex;
   align-items: center;
   gap: 4px;
@@ -193,14 +211,22 @@ const PANE_WRAP_CSS = `
   color: var(--ui-text-secondary);
   white-space: nowrap;
 }
-.githermes-pane .gh-card-arrow { color: var(--ui-text-quaternary); opacity: .5; }
-.githermes-pane .gh-list-row:hover .gh-card-arrow { color: var(--ui-accent); opacity: 1; }
-.githermes-pane .gh-empty {
+.gh-actions-pane .gh-card-arrow { color: var(--ui-text-quaternary); opacity: .5; }
+.gh-actions-pane .gh-list-row:hover .gh-card-arrow { color: var(--ui-accent); opacity: 1; }
+/* Per-row action. Rendered always (not display:none) so it stays reachable by
+   keyboard and on touch, where :hover never fires; hover/focus only raises it
+   out of the row's visual background. */
+.gh-actions-pane .gh-row-action { color: var(--ui-text-quaternary); opacity: .45; transition: opacity 120ms ease, color 120ms ease; }
+.gh-actions-pane .gh-list-row:hover .gh-row-action { opacity: 1; color: var(--ui-text-secondary); }
+.gh-actions-pane .gh-row-action:hover:not(:disabled) { opacity: 1; color: var(--ui-accent); }
+.gh-actions-pane .gh-row-action:focus-visible { opacity: 1; }
+.gh-actions-pane .gh-row-action:disabled { opacity: .25; }
+.gh-actions-pane .gh-empty {
   min-height: 280px;
   background: transparent;
 }
-.githermes-pane .gh-empty-icon { width: 48px; height: 48px; border-radius: 14px; font-size: 20px; }
-.githermes-pane .gh-detail-summary {
+.gh-actions-pane .gh-empty-icon { width: 48px; height: 48px; border-radius: 14px; font-size: 20px; }
+.gh-actions-pane .gh-detail-summary {
   position: relative;
   display: flex;
   flex-direction: column;
@@ -209,40 +235,40 @@ const PANE_WRAP_CSS = `
   background-image: radial-gradient(circle, color-mix(in srgb, var(--ui-stroke-secondary) 55%, transparent) 0.65px, transparent 0.7px);
   background-size: 8px 8px;
 }
-.githermes-pane .gh-detail-title { display: block; }
-.githermes-pane .gh-detail-title .gh-item-num { white-space: nowrap; }
-.githermes-pane .gh-detail-meta {
+.gh-actions-pane .gh-detail-title { display: block; }
+.gh-actions-pane .gh-detail-title .gh-item-num { white-space: nowrap; }
+.gh-actions-pane .gh-detail-meta {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   column-gap: 10px;
   row-gap: 6px;
 }
-.githermes-pane .gh-detail-labels {
+.gh-actions-pane .gh-detail-labels {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
 }
-.githermes-pane .gh-detail-root { min-height: 0; }
-.githermes-pane .gh-comment-composer { flex: none; }
-.githermes-pane .gh-comment-composer textarea {
+.gh-actions-pane .gh-detail-root { min-height: 0; }
+.gh-actions-pane .gh-comment-composer { flex: none; }
+.gh-actions-pane .gh-comment-composer textarea {
   field-sizing: content;
   min-height: 2rem;
   max-height: 8rem;
   overflow-y: auto;
 }
-.githermes-pane .gh-detail-tabs { background: var(--ui-editor-surface-background); }
-.githermes-pane .gh-detail-tabs > div { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-.githermes-pane .gh-detail-tabs button,
-.githermes-pane .gh-list-tabs button { min-width: 0; overflow: hidden; padding-inline: 6px; text-overflow: ellipsis; white-space: nowrap; }
-.githermes-pane .gh-list-tabs > div { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-.githermes-pane .gh-comment-action { opacity: .45; transition: opacity 120ms ease; }
-.githermes-pane .gh-comment:hover .gh-comment-action,
-.githermes-pane .gh-comment:focus-within .gh-comment-action { opacity: 1; }
-.githermes-pane .gh-timeline { display: flex; flex-direction: column; gap: 12px; }
-.githermes-pane .gh-timeline > :is(.gh-comment, .gh-commit) { position: relative; }
-.githermes-pane .gh-timeline > .gh-comment:has(+ .gh-comment)::after,
-.githermes-pane .gh-timeline > .gh-commit:has(+ .gh-commit)::after {
+.gh-actions-pane .gh-detail-tabs { background: var(--ui-editor-surface-background); }
+.gh-actions-pane .gh-detail-tabs > div { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.gh-actions-pane .gh-detail-tabs button,
+.gh-actions-pane .gh-list-tabs button { min-width: 0; overflow: hidden; padding-inline: 6px; text-overflow: ellipsis; white-space: nowrap; }
+.gh-actions-pane .gh-list-tabs > div { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.gh-actions-pane .gh-comment-action { opacity: .45; transition: opacity 120ms ease; }
+.gh-actions-pane .gh-comment:hover .gh-comment-action,
+.gh-actions-pane .gh-comment:focus-within .gh-comment-action { opacity: 1; }
+.gh-actions-pane .gh-timeline { display: flex; flex-direction: column; gap: 12px; }
+.gh-actions-pane .gh-timeline > :is(.gh-comment, .gh-commit) { position: relative; }
+.gh-actions-pane .gh-timeline > .gh-comment:has(+ .gh-comment)::after,
+.gh-actions-pane .gh-timeline > .gh-commit:has(+ .gh-commit)::after {
   content: '';
   position: absolute;
   left: 11px;
@@ -250,38 +276,38 @@ const PANE_WRAP_CSS = `
   background: var(--ui-stroke-secondary);
   pointer-events: none;
 }
-.githermes-pane .gh-timeline > .gh-comment:has(+ .gh-comment)::after { top: 26px; bottom: -12px; }
-.githermes-pane .gh-timeline > .gh-commit:has(+ .gh-commit)::after { top: 16px; bottom: -12px; }
-.githermes-pane .gh-commit-node {
+.gh-actions-pane .gh-timeline > .gh-comment:has(+ .gh-comment)::after { top: 26px; bottom: -12px; }
+.gh-actions-pane .gh-timeline > .gh-commit:has(+ .gh-commit)::after { top: 16px; bottom: -12px; }
+.gh-actions-pane .gh-commit-node {
   width: 8px; height: 8px; margin: 6px 7px 0; flex: none;
   border-radius: 50%;
   border: 1.5px solid var(--ui-text-quaternary);
   background: var(--ui-editor-surface-background);
 }
-.githermes-pane .gh-commit-action { opacity: .45; transition: opacity 120ms ease; }
-.githermes-pane .gh-commit:hover .gh-commit-action,
-.githermes-pane .gh-commit:focus-within .gh-commit-action { opacity: 1; }
-.githermes-pane .gh-commit > summary { cursor: pointer; list-style: none; }
-.githermes-pane .gh-commit > summary::-webkit-details-marker { display: none; }
-.githermes-pane .gh-commit-panel { margin-left: 26px; margin-top: 8px; padding-bottom: 4px; }
-.githermes-pane .gh-narrow-only { display: none; }
+.gh-actions-pane .gh-commit-action { opacity: .45; transition: opacity 120ms ease; }
+.gh-actions-pane .gh-commit:hover .gh-commit-action,
+.gh-actions-pane .gh-commit:focus-within .gh-commit-action { opacity: 1; }
+.gh-actions-pane .gh-commit > summary { cursor: pointer; list-style: none; }
+.gh-actions-pane .gh-commit > summary::-webkit-details-marker { display: none; }
+.gh-actions-pane .gh-commit-panel { margin-left: 26px; margin-top: 8px; padding-bottom: 4px; }
+.gh-actions-pane .gh-narrow-only { display: none; }
 @container (max-width: 359px) {
-  .githermes-pane .gh-detail-tabs > div { display: flex; width: 100%; overflow-x: auto; }
-  .githermes-pane .gh-detail-tabs button { flex: none; min-width: max-content; }
+  .gh-actions-pane .gh-detail-tabs > div { display: flex; width: 100%; overflow-x: auto; }
+  .gh-actions-pane .gh-detail-tabs button { flex: none; min-width: max-content; }
 }
 @container (max-width: 299px) {
-  .githermes-pane .gh-comment { display: block; }
-  .githermes-pane .gh-comment-avatar { display: none; }
-  .githermes-pane .gh-timeline > .gh-comment:has(+ .gh-comment)::after,
-  .githermes-pane .gh-timeline > .gh-commit:has(+ .gh-commit)::after { display: none; }
-  .githermes-pane .gh-commit-action { opacity: 1; }
-  .githermes-pane .gh-comment-action { opacity: 1; }
-  .githermes-pane .gh-detail-meta { display: none; }
-  .githermes-pane .gh-detail-title { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .gh-actions-pane .gh-comment { display: block; }
+  .gh-actions-pane .gh-comment-avatar { display: none; }
+  .gh-actions-pane .gh-timeline > .gh-comment:has(+ .gh-comment)::after,
+  .gh-actions-pane .gh-timeline > .gh-commit:has(+ .gh-commit)::after { display: none; }
+  .gh-actions-pane .gh-commit-action { opacity: 1; }
+  .gh-actions-pane .gh-comment-action { opacity: 1; }
+  .gh-actions-pane .gh-detail-meta { display: none; }
+  .gh-actions-pane .gh-detail-title { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 }
 @container (max-width: 239px) {
-  .githermes-pane .gh-pane-content { display: none; }
-  .githermes-pane .gh-narrow-only { display: flex; }
+  .gh-actions-pane .gh-pane-content { display: none; }
+  .gh-actions-pane .gh-narrow-only { display: flex; }
 }
 `
 
@@ -430,41 +456,55 @@ export function selectedIssueNumbers(selection, repo) {
   return out.sort((a, b) => a - b)
 }
 
-// Implement: hand a set of issues to a fresh session running the `/implement`
-// skill. Unlike AssignToBot this REQUIRES a checkout — the skill's job is to
-// write code and commit, so a session whose cwd is not this repo would edit the
-// wrong tree. The plan names the command and the instruction; the backend
-// expands the skill itself (command.dispatch, skill stage), so nothing here
-// duplicates the skill's text.
-export function buildImplementPlan({ numbers, repo, sessionRepo, sessionCwd } = {}) {
+// Generic action engine. `/implement` was the first case; actions are now a
+// user-editable set (title, skill command, instruction, appliesTo, whether the
+// skill needs a checkout) resolved per item either by a label rule or by a
+// per-kind default. Unlike AssignToBot, an action WITH requiresCheckout=true
+// needs a session whose cwd is this repo — the skill's job can be to write
+// code and commit, so a session in the wrong tree would edit the wrong repo.
+// The plan only names the command and the instruction; the backend expands
+// the skill itself (command.dispatch, skill stage), so nothing here duplicates
+// the skill's text.
+export function buildActionPlan({ action, numbers, repo, kind = 'issue', sessionRepo, sessionCwd } = {}) {
+  if (!action || !String(action.command || '').trim()) return { error: 'No action selected' }
   const repoName = String(repo || '').trim()
   if (!repoOk(repoName)) return { error: 'Missing or invalid repository' }
   // Selection sets carry strings; normalize, drop anything that is not a
-  // positive integer issue number, dedupe, and sort so the title is stable.
+  // positive integer number, dedupe, and sort so the title is stable.
   const seen = new Set()
   for (const raw of Array.isArray(numbers) ? numbers : []) {
     const n = Number(raw)
     if (Number.isInteger(n) && n > 0) seen.add(n)
   }
   const list = [...seen].sort((a, b) => a - b)
-  if (!list.length) return { error: 'Select at least one issue' }
+  const noun = kind === 'pr' ? 'pull request' : 'issue'
+  if (!list.length) return { error: `Select at least one ${noun}` }
   const sameRepo = String(sessionRepo || '').trim().toLowerCase() === repoName.toLowerCase()
   const cwd = sameRepo && sessionCwd ? String(sessionCwd) : ''
-  if (!cwd) return { error: `Open a session in the ${repoName} checkout first — /implement needs a working tree.` }
-  const links = list.map(n => `https://github.com/${repoName}/issues/${n}`)
-  // ONLY the numbers are interpolated. Issue titles and bodies are deliberately
-  // absent: the agent fetches them itself as untrusted data, so a hostile title
-  // can never reach the instruction slot as if it were the user speaking.
-  const arg = [
-    list.length === 1 ? `Implement ${links[0]}` : `Implement these issues in ${repoName}:\n${links.map(l => `- ${l}`).join('\n')}`,
-    `Read each issue and its comments first. ${UNTRUSTED_CONTENT_RULE}`,
-  ].join('\n')
+  if (action.requiresCheckout && !cwd) {
+    return { error: `Open a session in the ${repoName} checkout first — ${action.title} needs a working tree.` }
+  }
+  const segment = kind === 'pr' ? 'pull' : 'issues'
+  const plural = kind === 'pr' ? 'pull requests' : 'issues'
+  const links = list.map(n => `https://github.com/${repoName}/${segment}/${n}`)
+  // ONLY the numbers are interpolated. Issue/PR titles and bodies are
+  // deliberately absent: the agent fetches them itself as untrusted data, so
+  // a hostile title can never reach the instruction slot as if it were the
+  // user speaking. A custom action's `instruction` is author-written (typed
+  // in Settings by the user, not fetched from GitHub), so it carries no more
+  // risk than the built-in ones.
+  const lead = list.length === 1
+    ? `${action.title} ${links[0]}`
+    : `${action.title} these ${plural} in ${repoName}:\n${links.map(l => `- ${l}`).join('\n')}`
+  const trailer = action.instruction ? `${action.instruction} ${UNTRUSTED_CONTENT_RULE}` : UNTRUSTED_CONTENT_RULE
   return {
-    command: 'implement',
-    arg,
-    cwd,
-    title: `Implement ${repoName} ${list.map(n => `#${n}`).join(' ')}`,
+    command: String(action.command).replace(/^\//, ''),
+    arg: [lead, trailer].join('\n'),
+    cwd: cwd || undefined,
+    title: `${action.title} ${repoName} ${list.map(n => `#${n}`).join(' ')}`,
     numbers: list,
+    actionId: action.id,
+    actionTitle: action.title,
   }
 }
 
@@ -476,16 +516,16 @@ export function isMissingCommandError(error) {
   return /not a quick\/plugin\/bundle\/skill command/i.test(String(error?.message || error || ''))
 }
 
-// Run a plan: create a session in the checkout, expand `/implement` through the
-// backend, and submit the result. `prompt.submit` does NOT parse slash commands
-// (the desktop client does that client-side), so submitting "/implement …" as
-// text would just hand the model nine literal characters. command.dispatch is
-// the door that resolves it, and running it against the NEW session id is what
-// binds skill lookup to that session's profile and cwd.
-export async function implementIssues(api, plan) {
+// Run a plan: create a session in the checkout (if any), expand the skill
+// through the backend, and submit the result. `prompt.submit` does NOT parse
+// slash commands (the desktop client does that client-side), so submitting
+// "/xyz …" as text would just hand the model literal characters.
+// command.dispatch is the door that resolves it, and running it against the
+// NEW session id is what binds skill lookup to that session's profile and cwd.
+export async function runAction(api, plan) {
   if (plan?.error) throw new Error(plan.error)
-  if (!assignHostReady(api)) throw new Error('Update Hermes Desktop to run /implement')
-  if (!plan?.command || !plan?.arg || !plan?.title) throw new Error('Invalid implement plan')
+  if (!assignHostReady(api)) throw new Error(`Update Hermes Desktop to run /${plan?.command || 'this action'}`)
+  if (!plan?.command || !plan?.arg || !plan?.title) throw new Error('Invalid action plan')
   const created = await api.request('session.create', { ...(plan.cwd ? { cwd: plan.cwd } : {}) })
   const runtime = created?.session_id
   const stored = created?.stored_session_id
@@ -502,9 +542,9 @@ export async function implementIssues(api, plan) {
   // A backend without the skill answers 4018 ("not a … command"). That case is
   // recoverable: the instruction still describes the work, so submit it. Any
   // OTHER dispatch failure (network, timeout, 5xx) is not recoverable here —
-  // degrading it to a bare prompt would silently drop /implement's TDD, review
-  // and commit steps while still reporting success, which is exactly the
-  // fallback-only design this feature was asked not to be.
+  // degrading it to a bare prompt would silently drop the skill's own steps
+  // while still reporting success, which is exactly the fallback-only design
+  // this feature was asked not to be.
   let text = plan.arg
   let skillExpanded = false
   try {
@@ -522,6 +562,152 @@ export async function implementIssues(api, plan) {
   }
   return { session_id: runtime, stored_session_id: stored, skillExpanded }
 }
+
+// Built-in "Implement" action. Still exported/tested standalone (buildImplementPlan,
+// implementIssues) for API stability — both are now thin wrappers over the
+// generic engine above, so the behavior (and its tests) are unchanged.
+export const IMPLEMENT_ACTION = {
+  id: 'implement', title: 'Implement', command: 'implement',
+  instruction: 'Read each issue and its comments first.',
+  appliesTo: ['issue'], requiresCheckout: true, builtin: true,
+}
+
+export function buildImplementPlan({ numbers, repo, sessionRepo, sessionCwd } = {}) {
+  return buildActionPlan({ action: IMPLEMENT_ACTION, numbers, repo, kind: 'issue', sessionRepo, sessionCwd })
+}
+
+export async function implementIssues(api, plan) {
+  return runAction(api, plan)
+}
+
+// The full built-in action set. Users add their own in Settings; these three
+// seed the label-rule defaults below and stay editable (not read-only), since
+// the whole point is that "Implement" for `ready-for-agent` is a DEFAULT, not
+// a hardcoded rule.
+export const DEFAULT_ACTIONS = [
+  IMPLEMENT_ACTION,
+  {
+    id: 'triage', title: 'Triage', command: 'triage',
+    instruction: 'Read the issue and its comments, then triage it: assess severity, flag missing information, and apply the right labels.',
+    appliesTo: ['issue'], requiresCheckout: false, builtin: true,
+  },
+  {
+    id: 'diagnose', title: 'Diagnose', command: 'diagnose',
+    instruction: 'Read the issue and its comments, then diagnose the root cause before proposing a fix.',
+    appliesTo: ['issue'], requiresCheckout: true, builtin: true,
+  },
+]
+
+// Label -> action routing. Ordered; first matching label wins. This is the
+// piece a per-type default alone can't express: "ready-for-agent" should mean
+// Implement even though the type default might be Triage.
+export const DEFAULT_LABEL_RULES = [
+  { id: 'rule-ready-for-agent', label: 'ready-for-agent', actionId: 'implement' },
+  { id: 'rule-needs-triage', label: 'needs-triage', actionId: 'triage' },
+  { id: 'rule-bug', label: 'bug', actionId: 'diagnose' },
+]
+
+// Per-kind fallback when no label rule matches. PRs have no default action
+// yet — v1 only wires the row/detail buttons for issues (see README).
+export const DEFAULT_ACTION_DEFAULTS = { issue: 'triage', pr: null }
+
+export function normalizeAction(raw) {
+  const id = String(raw?.id || '').trim()
+  const title = String(raw?.title || '').trim()
+  const command = String(raw?.command || '').trim().replace(/^\//, '')
+  if (!id || !title || !command) return null
+  const appliesToRaw = Array.isArray(raw?.appliesTo) ? raw.appliesTo.filter(k => k === 'issue' || k === 'pr') : []
+  return {
+    id, title, command,
+    instruction: String(raw?.instruction || '').trim(),
+    appliesTo: appliesToRaw.length ? appliesToRaw : ['issue'],
+    requiresCheckout: !!raw?.requiresCheckout,
+    builtin: !!raw?.builtin,
+  }
+}
+
+// Dedupe by id (last one wins is NOT the rule here — first wins, so a
+// corrupted storage blob with a repeated id can't silently displace the
+// built-in with the same id after an edit race).
+export function normalizeActions(list) {
+  const seen = new Set()
+  const out = []
+  for (const raw of Array.isArray(list) ? list : []) {
+    const action = normalizeAction(raw)
+    if (!action || seen.has(action.id)) continue
+    seen.add(action.id)
+    out.push(action)
+  }
+  return out
+}
+
+export function findAction(actions, id) {
+  return (Array.isArray(actions) ? actions : []).find(a => a.id === id) || null
+}
+
+// First label (in rule order, not issue-label order) that has a rule wins.
+// Label names compare case-insensitively — GitHub label matching already is.
+export function matchLabelRule(labels, rules) {
+  const names = new Set((Array.isArray(labels) ? labels : []).map(l => String(l?.name ?? l ?? '').toLowerCase()).filter(Boolean))
+  for (const rule of Array.isArray(rules) ? rules : []) {
+    const pattern = String(rule?.label || '').trim().toLowerCase()
+    if (pattern && names.has(pattern) && rule?.actionId) return rule.actionId
+  }
+  return null
+}
+
+// The full resolution order: label rule beats the per-kind default. Returns
+// an id, not an action object, so a stale/deleted action id resolves to
+// "nothing" (caller falls back to letting the user pick) rather than crashing.
+export function resolveActionId({ labels, kind, rules, defaults }) {
+  return matchLabelRule(labels, rules) || (defaults ? defaults[kind] : null) || null
+}
+
+export function normalizeLabelRule(raw) {
+  const label = String(raw?.label || '').trim()
+  const actionId = String(raw?.actionId || '').trim()
+  if (!label || !actionId) return null
+  return { id: String(raw?.id || '').trim() || `rule-${label}`, label, actionId }
+}
+
+export function normalizeLabelRules(list) {
+  return (Array.isArray(list) ? list : []).map(normalizeLabelRule).filter(Boolean)
+}
+
+export function normalizeActionDefaults(raw) {
+  const src = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {}
+  const pick = v => (typeof v === 'string' && v.trim()) ? v.trim() : null
+  return { issue: pick(src.issue), pr: pick(src.pr) }
+}
+
+// Named settings-storage keys, single-sourced so the register() hydration and
+// every write site agree on spelling.
+const ACTIONS_STORAGE_KEY = 'actions'
+const LABEL_RULES_STORAGE_KEY = 'labelRules'
+const ACTION_DEFAULTS_STORAGE_KEY = 'actionDefaults'
+
+// User-editable Actions (named prompt templates run against issues/PRs) and
+// the label -> action routing rules, plus per-kind fallback defaults. Seeded
+// from DEFAULT_ACTIONS/DEFAULT_LABEL_RULES/DEFAULT_ACTION_DEFAULTS on first
+// run (register()), then persisted to plugin storage on every edit in the
+// settings overlay. Declared after the DEFAULT_* constants they seed from.
+const $actions = atom(DEFAULT_ACTIONS)
+const $labelRules = atom(DEFAULT_LABEL_RULES)
+const $actionDefaults = atom(DEFAULT_ACTION_DEFAULTS)
+
+function persistActions(next) {
+  $actions.set(next)
+  pluginCtx?.storage.set(ACTIONS_STORAGE_KEY, next)
+}
+function persistLabelRules(next) {
+  $labelRules.set(next)
+  pluginCtx?.storage.set(LABEL_RULES_STORAGE_KEY, next)
+}
+function persistActionDefaults(next) {
+  $actionDefaults.set(next)
+  pluginCtx?.storage.set(ACTION_DEFAULTS_STORAGE_KEY, next)
+}
+
 
 // SDK relativeTime(targetMs: number) — gh returns ISO strings. NaN throws in Intl.
 export function ago(iso) {
@@ -800,7 +986,7 @@ async function ghApi(repo, path, jq) {
 // (the mask is not an error: the RPC still returns code 0). The joined payload
 // then failed atob/JSON.parse and the pane showed a generic error while the
 // devtools console stayed clean, because nothing actually threw upstream.
-// Measured on claudioorjunior/githermes: 72 `eyJ` hits in the issue list, and
+// Measured on chrisbevins/gh-actions-pane: 72 `eyJ` hits in the issue list, and
 // 100% of chunk sets corrupted at every --limit from 5 up. Random-payload fuzz:
 // base64 corrupts ~3% of 6KB payloads, hex and base32 corrupt 0/3000.
 // Hex costs 2.0x the raw bytes vs base64's 1.33x; the --jq projections on the
@@ -1255,7 +1441,7 @@ function inlineFileChip(c) {
   return c.path ? (line ? `${c.path}:${line}` : c.path) : ''
 }
 
-const GITHUB_SHELL_STORE_KEY = Symbol.for('githermes.github-shell-store.v1')
+const GITHUB_SHELL_STORE_KEY = Symbol.for('gh-actions-pane.github-shell-store.v1')
 
 export function getGitHubShellStore() {
   let store = globalThis[GITHUB_SHELL_STORE_KEY]
@@ -1511,9 +1697,9 @@ function SessionPrStatus() {
 // comes from the plugin install ledger ($HERMES_HOME, expanded by the backend
 // shell), the behind count from a GitHub compare (installs are shallow clones,
 // so local rev-list would miscount), and the update button runs the same CLI
-// users would. Null when githermes is not an installed package (dev symlinks)
+// users would. Null when gh-actions-pane is not an installed package (dev symlinks)
 // — those update through git itself.
-const PLUGIN_REPO = 'claudioorjunior/githermes'
+const PLUGIN_REPO = 'chrisbevins/gh-actions-pane'
 function PluginUpdateStatus() {
   const [updating, setUpdating] = useState(false)
   const [error, setError] = useState('')
@@ -1567,20 +1753,20 @@ function PluginUpdateStatus() {
   const needsUpdate = behind > 0 || rollback
   return jsx(Tip, {
     label: behind > 0
-      ? `githermes @${sha7} — ${behind} new ${unit} ${where}, click to update`
+      ? `gh-actions-pane @${sha7} — ${behind} new ${unit} ${where}, click to update`
       : rollback
-        ? `githermes @${sha7} — ahead of catalog pin, click to re-sync`
+        ? `gh-actions-pane @${sha7} — ahead of catalog pin, click to re-sync`
         : behind == null
-          ? `githermes @${sha7} — could not check for updates`
-          : `githermes @${sha7} — up to date`,
+          ? `gh-actions-pane @${sha7} — could not check for updates`
+          : `gh-actions-pane @${sha7} — up to date`,
     children: jsxs('button', {
       type: 'button',
       onClick: update,
-      'aria-label': behind > 0 ? `Update githermes (${behind} new ${unit})` : rollback ? 'Update githermes (re-sync to catalog pin)' : `githermes ${sha7}`,
+      'aria-label': behind > 0 ? `Update gh-actions-pane (${behind} new ${unit})` : rollback ? 'Update gh-actions-pane (re-sync to catalog pin)' : `gh-actions-pane ${sha7}`,
       className: 'inline-flex h-full min-w-0 items-center gap-1 px-1.5 text-[0.6875rem] text-(--ui-text-tertiary) hover:text-(--ui-text-primary)',
       children: [
         jsx(Codicon, { name: 'package', size: 12, className: 'shrink-0' + (needsUpdate ? ' text-(--ui-yellow)' : '') }),
-        jsx('span', { className: 'truncate tabular-nums', children: `githermes @${sha7}` }),
+        jsx('span', { className: 'truncate tabular-nums', children: `gh-actions-pane @${sha7}` }),
         behind > 0
           ? updating
             ? jsx(GlyphSpinner, {})
@@ -3047,19 +3233,19 @@ function IssueList({ repo, onOpen, query, active = true }) {
               onClick: () => $issueSelection.set([]),
               children: 'Clear',
             }),
-            jsx(ImplementButton, { repo, numbers: selected, onDone: () => $issueSelection.set([]) }),
+            jsx(ActionButton, { repo, numbers: selected, kind: 'issue', labels: [], onDone: () => $issueSelection.set([]) }),
           ],
         }) : null,
         ...items.map(it =>
         jsxs('div', {
           onClick: () => onOpen(it.number),
-          className: 'gh-list-row w-full text-left px-3 py-2.5 flex gap-2.5 items-start',
+          className: 'gh-list-row w-full text-left px-3 py-2 flex gap-2.5 items-start',
           children: [
             // Checkbox is a sibling of the row's open-target, and stops
             // propagation: selecting must never navigate into the detail view.
             jsx('input', {
               type: 'checkbox',
-              className: 'mt-1.5 size-3 shrink-0 accent-(--ui-accent)',
+              className: 'mt-1 size-3 shrink-0 accent-(--ui-accent)',
               checked: selected.includes(it.number),
               'aria-label': `Select issue #${it.number}`,
               onClick: event => event.stopPropagation(),
@@ -3072,16 +3258,29 @@ function IssueList({ repo, onOpen, query, active = true }) {
             jsxs('span', {
               className: 'min-w-0 flex-1',
               children: [
-                jsx('button', { type: 'button', className: 'gh-row-open block w-full text-left', children: jsx(ItemTitle, { title: it.title, number: it.number }) }),
+                // Condensed single line: #number leads (more scannable in a
+                // narrow pane than buried after the title), then the title,
+                // then author + time pushed to the row's trailing edge.
+                jsxs('div', { className: 'flex min-w-0 items-baseline gap-1.5', children: [
+                  jsx('button', {
+                    type: 'button',
+                    className: 'gh-row-open flex min-w-0 items-baseline gap-1.5 text-left',
+                    children: [
+                      jsx('span', { className: 'gh-item-num shrink-0 font-mono text-[10px] font-normal text-(--ui-text-quaternary)', children: `#${it.number}` }),
+                      jsx('span', { className: 'gh-list-title truncate', children: it.title }),
+                    ],
+                  }),
+                  jsxs('span', { className: 'ml-auto shrink-0 whitespace-nowrap text-[10px] text-(--ui-text-tertiary)', children: [
+                    it.author?.login ? jsx('button', { type: 'button', className: 'gh-filter-token', onClick: event => setListFilter(event, 'author', it.author?.login), children: `@${it.author.login}` }) : '—',
+                    ` · ${ago(it.updatedAt)}`,
+                  ] }),
+                ] }),
                 Array.isArray(it.labels) && it.labels.length
                   ? jsx('span', { className: 'mt-1 flex flex-wrap gap-1 items-center', children: it.labels.map(l => jsx(LabelChip, { label: l, onClick: event => setListFilter(event, 'label', l.name) }, l.name || l.id)) })
                   : null,
-                jsxs('span', { className: 'text-[10px] text-(--ui-text-tertiary)', children: [
-                  it.author?.login ? jsx('button', { type: 'button', className: 'gh-filter-token', onClick: event => setListFilter(event, 'author', it.author?.login), children: `@${it.author.login}` }) : '—',
-                  ` · ${ago(it.updatedAt)}`,
-                ] }),
               ],
             }),
+            jsx(ActionButton, { repo, numbers: [it.number], kind: 'issue', labels: it.labels, iconOnly: true }),
             jsx(Codicon, { name: 'chevron-right', className: 'gh-card-arrow mt-1 shrink-0', 'aria-hidden': true }),
           ],
         }, String(it.number))
@@ -3092,51 +3291,108 @@ function IssueList({ repo, onOpen, query, active = true }) {
   })
 }
 
-// Implement action. Shared by the issue-list action bar (many issues) and the
-// issue detail toolbar (one), so both paths build the same plan and land in the
-// same kind of session.
-function ImplementButton({ repo, numbers, onDone, variant = 'ghost', label }) {
+// Generic Action button. Resolves which action applies (label rule > per-kind
+// default) and runs it on a bare click; the chevron opens every OTHER action
+// scoped to this item kind, so a one-off (e.g. run Diagnose on a
+// ready-for-agent issue) never requires visiting Settings first.
+function ActionButton({ repo, numbers, kind = 'issue', labels, onDone, variant = 'ghost', iconOnly = false, className }) {
   const cwd = useValue(host.state.cwd)
   const sessionGitQ = useSessionGit(cwd)
-  const plan = buildImplementPlan({
-    numbers, repo,
-    sessionRepo: sessionGitQ.data?.repo,
-    sessionCwd: cwd,
-  })
+  const actions = useValue($actions).filter(a => a.appliesTo.includes(kind))
+  const rules = useValue($labelRules)
+  const defaults = useValue($actionDefaults)
+  const resolvedId = resolveActionId({ labels, kind, rules, defaults })
+  const resolved = findAction(actions, resolvedId) || actions[0] || null
+  const [pendingAction, setPendingAction] = useState(null)
   const run = useMutation({
-    mutationFn: () => implementIssues(host, plan),
-    onSuccess: result => {
-      const what = numbers.length === 1 ? `#${numbers[0]}` : `${numbers.length} issues`
+    mutationFn: action => runAction(host, buildActionPlan({
+      action, numbers, repo, kind,
+      sessionRepo: sessionGitQ.data?.repo,
+      sessionCwd: cwd,
+    })),
+    onMutate: action => setPendingAction(action.id),
+    onSuccess: (result, action) => {
+      const what = numbers.length === 1 ? `#${numbers[0]}` : `${numbers.length} ${kind === 'pr' ? 'pull requests' : 'issues'}`
       // Say so when the skill was missing: the session got a bare instruction
-      // without /implement's TDD/review/commit steps, and silently calling that
-      // success would misrepresent what is about to happen.
+      // without the skill's own steps, and silently calling that success
+      // would misrepresent what is about to happen.
       host.notify?.(result?.skillExpanded === false
-        ? { kind: 'warning', message: `Opened ${what} without the /implement skill — it is not installed on this backend` }
-        : { kind: 'info', message: `Implementing ${what}` })
+        ? { kind: 'warning', message: `Opened ${what} without the /${action.command} skill — it is not installed on this backend` }
+        : { kind: 'info', message: `${action.title}: ${what}` })
       onDone?.()
     },
-    onError: error => host.notify?.({ kind: 'error', message: String(error?.message || error) }),
+    onError: (error, action) => {
+      const plan = buildActionPlan({ action, numbers, repo, kind, sessionRepo: sessionGitQ.data?.repo, sessionCwd: cwd })
+      host.notify?.({ kind: 'error', message: plan.error || String(error?.message || error) })
+    },
+    onSettled: () => setPendingAction(null),
   })
-  // A blocked plan still renders a button: a disabled control with the reason in
-  // its tooltip explains why, where a hidden one would just look broken.
-  const blocked = !!plan.error
-  return jsx(Button, {
+  if (!resolved) {
+    // No action applies to this kind at all — nothing to render, same as a
+    // hidden AssignToBot when the host is too old. Settings can always add one.
+    return null
+  }
+  const one = numbers.length === 1 ? `#${numbers[0]}` : `${numbers.length} ${kind === 'pr' ? 'pull requests' : 'issues'}`
+  const others = actions.filter(a => a.id !== resolved.id)
+  const runOne = action => {
+    const plan = buildActionPlan({ action, numbers, repo, kind, sessionRepo: sessionGitQ.data?.repo, sessionCwd: cwd })
+    if (plan.error) { host.notify?.({ kind: 'error', message: plan.error }); return }
+    run.mutate(action)
+  }
+  const primaryPlan = buildActionPlan({ action: resolved, numbers, repo, kind, sessionRepo: sessionGitQ.data?.repo, sessionCwd: cwd })
+  const blocked = !!primaryPlan.error
+  const primaryBtn = jsx(Button, {
     type: 'button',
     variant,
     size: 'sm',
-    className: 'h-7 shrink-0 px-2 text-xs',
+    className: className || (iconOnly ? 'gh-row-action mt-0.5 size-6 shrink-0 rounded-r-none border-r-0 p-0' : 'h-7 shrink-0 rounded-r-none px-2 text-xs'),
     disabled: run.isPending || blocked,
-    title: plan.error || `Open a session running /implement in ${repo}`,
-    'aria-label': label || 'Implement selected issues',
-    onClick: () => { if (!blocked) run.mutate() },
-    children: run.isPending
+    title: primaryPlan.error || `Run "${resolved.title}" on ${one}`,
+    'aria-label': iconOnly ? `${resolved.title} ${one}` : `${resolved.title} selected`,
+    // A row action lives INSIDE the row's open-target, so a bare click would
+    // also navigate into the detail view behind the new session. Swallow the
+    // event here rather than relying on the row to special-case this child.
+    onClick: event => {
+      event.stopPropagation()
+      if (!blocked) run.mutate(resolved)
+    },
+    children: run.isPending && pendingAction === resolved.id
       ? jsx(GlyphSpinner, {})
-      : jsxs('span', { className: 'flex items-center gap-1.5', children: [
-        jsx(Codicon, { name: 'tools', size: 12 }),
-        label || `Implement (${numbers.length})`,
-      ] }),
+      : iconOnly
+        ? jsx(Codicon, { name: 'tools', size: 12 })
+        : jsxs('span', { className: 'flex items-center gap-1.5', children: [
+          jsx(Codicon, { name: 'tools', size: 12 }),
+          resolved.title,
+        ] }),
   })
+  if (!others.length) return primaryBtn
+  return jsxs('span', { className: 'flex shrink-0 items-center', onClick: event => event.stopPropagation(), children: [
+    primaryBtn,
+    jsxs(DropdownMenu, { children: [
+      jsx(DropdownMenuTrigger, {
+        asChild: true,
+        children: jsx(Button, {
+          type: 'button',
+          variant,
+          size: 'sm',
+          disabled: run.isPending,
+          className: iconOnly ? 'gh-row-action size-6 shrink-0 rounded-l-none p-0' : 'h-7 shrink-0 rounded-l-none border-l border-(--ui-stroke-secondary) px-1',
+          'aria-label': `Other actions for ${one}`,
+          children: jsx(Codicon, { name: 'chevron-down', size: 10 }),
+        }),
+      }),
+      jsx(DropdownMenuContent, { align: 'end', children: others.map(action => jsx(DropdownMenuItem, {
+        onClick: () => runOne(action),
+        children: action.title,
+      }, action.id)) }),
+    ] }),
+  ] })
 }
+
+// Implement action retained as a standalone plan builder / runner
+// (buildImplementPlan / implementIssues above) for API stability; the row and
+// detail UI now go through the generic ActionButton instead of a dedicated
+// component, since Implement is just one entry in the user-editable Actions list.
 
 function AssignToBot({ kind, repo, number }) {
   const [open, setOpen] = useState(false)
@@ -3252,7 +3508,7 @@ function AssignToBot({ kind, repo, number }) {
   })
 }
 
-function DetailToolbar({ repo, number, url, title, kind, checkoutCommand, onBack, backLabel }) {
+function DetailToolbar({ repo, number, url, title, kind, labels, checkoutCommand, onBack, backLabel, onOpenSettings }) {
   const [owner, name] = String(repo || '').split('/')
   const ask = kind === 'pr'
     ? jsx(AskHermesButton, { action: 'pr', repo, number, label: 'Ask Hermes' })
@@ -3270,11 +3526,12 @@ function DetailToolbar({ repo, number, url, title, kind, checkoutCommand, onBack
       ] }),
       url ? jsxs('span', { className: 'ml-auto flex shrink-0 items-center gap-0.5', children: [
         ask,
-        kind === 'issue' ? jsx(ImplementButton, { repo, numbers: [number], label: 'Implement' }) : null,
+        (kind === 'issue' || kind === 'pr') ? jsx(ActionButton, { repo, numbers: [number], kind, labels }) : null,
         jsx(AssignToBot, { kind, repo, number }),
         checkoutCommand ? jsx(CopyButton, { appearance: 'icon', buttonSize: 'icon-sm', label: 'Copy checkout command', text: checkoutCommand }) : null,
         jsx(CopyButton, { appearance: 'icon', buttonSize: 'icon-sm', label: 'Copy GitHub URL', text: url }),
         jsx(Button, { variant: 'ghost', size: 'sm', className: 'h-7 w-7 p-0', onClick: () => openExternal(url), 'aria-label': 'Open on GitHub', children: jsx(Codicon, { name: 'link-external' }) }),
+        jsx(Button, { variant: 'ghost', size: 'sm', className: 'h-7 w-7 p-0', onClick: () => onOpenSettings?.(), 'aria-label': 'Manage actions', children: jsx(Codicon, { name: 'settings-gear' }) }),
       ] }) : null,
     ],
   })
@@ -3353,7 +3610,7 @@ function CommentComposer({ repo, number, kind, onPosted }) {
   })
   return jsxs('form', {
     className: 'gh-comment-composer shrink-0 border-t border-(--ui-stroke-secondary) px-3 py-2',
-    'data-slot': 'githermes-comment-composer',
+    'data-slot': 'gh-actions-pane-comment-composer',
     onSubmit: e => { e.preventDefault(); submit() },
     onFocus: () => setFocused(true),
     onBlur: e => { if (!e.currentTarget.contains(e.relatedTarget)) setFocused(false) },
@@ -3408,7 +3665,7 @@ function CommentComposer({ repo, number, kind, onPosted }) {
   })
 }
 
-function PrDetail({ repo, number, onBack, active = true }) {
+function PrDetail({ repo, number, onBack, active = true, onOpenSettings }) {
   const [page, setPage] = useState('conversation')
   const convEndRef = useRef(null)
   const [atBottom, setAtBottom] = useState(true)
@@ -3533,7 +3790,7 @@ function PrDetail({ repo, number, onBack, active = true }) {
   return jsxs('div', {
     className: 'gh-detail-root flex h-full min-h-0 flex-col overflow-hidden',
     children: [
-      jsx(DetailToolbar, { repo, number: d.number, url, title: d.title, kind: 'pr', checkoutCommand: formatPrCheckoutCmd(repo, d.number), onBack, backLabel: 'Back to pull requests' }),
+      jsx(DetailToolbar, { repo, number: d.number, url, title: d.title, kind: 'pr', checkoutCommand: formatPrCheckoutCmd(repo, d.number), onBack, backLabel: 'Back to pull requests', onOpenSettings }),
       jsxs(DetailSummary, {
         title: d.title,
         number: d.number,
@@ -3626,7 +3883,7 @@ function PrDetail({ repo, number, onBack, active = true }) {
   })
 }
 
-function IssueDetail({ repo, number, onBack, active = true }) {
+function IssueDetail({ repo, number, onBack, active = true, onOpenSettings }) {
   const n = String(number)
   const convEndRef = useRef(null)
   const q = useQuery({
@@ -3644,7 +3901,7 @@ function IssueDetail({ repo, number, onBack, active = true }) {
   return jsxs('div', {
     className: 'gh-detail-root flex h-full min-h-0 flex-col overflow-hidden',
     children: [
-      jsx(DetailToolbar, { repo, number: d.number, url: d.url, title: d.title, kind: 'issue', onBack, backLabel: 'Back to issues' }),
+      jsx(DetailToolbar, { repo, number: d.number, url: d.url, title: d.title, kind: 'issue', labels: d.labels, onBack, backLabel: 'Back to issues', onOpenSettings }),
       jsx(DetailSummary, {
         title: d.title,
         number: d.number,
@@ -3803,16 +4060,225 @@ function useListKeyboardFlow(query) {
   return { searchRef, onKeyDown }
 }
 
+// Settings overlay: manage the Action list, the label -> action routing
+// rules (ordered, first match wins), and the per-kind fallback default.
+// Rendered full-pane in place of the list/detail (same slot GitHubPane and
+// GithubPage already switch on), since the SDK has no pane-scoped Dialog and
+// this needs more room than a popover.
+function ActionsSettings({ onBack }) {
+  const actions = useValue($actions)
+  const rules = useValue($labelRules)
+  const defaults = useValue($actionDefaults)
+  const [editing, setEditing] = useState(null) // action object, or {} for new
+  const [addingRule, setAddingRule] = useState(false)
+  const [ruleLabel, setRuleLabel] = useState('')
+  const [ruleActionId, setRuleActionId] = useState('')
+
+  const saveAction = next => {
+    const normalized = normalizeAction(next)
+    if (!normalized) { host.notify?.({ kind: 'error', message: 'Title, prompt command and at least one "applies to" are required' }); return }
+    const existing = actions.some(a => a.id === normalized.id)
+    persistActions(existing ? actions.map(a => (a.id === normalized.id ? normalized : a)) : [...actions, normalized])
+    setEditing(null)
+  }
+  const deleteAction = id => {
+    persistActions(actions.filter(a => a.id !== id))
+    // Dangling references degrade to "let the user pick" (resolveActionId
+    // returns null for a deleted id), never a crash — but drop them from
+    // storage too so Settings doesn't show a rule/default pointing at nothing.
+    persistLabelRules(rules.filter(r => r.actionId !== id))
+    if (defaults.issue === id || defaults.pr === id) {
+      persistActionDefaults({ issue: defaults.issue === id ? null : defaults.issue, pr: defaults.pr === id ? null : defaults.pr })
+    }
+  }
+  const addRule = () => {
+    const rule = normalizeLabelRule({ label: ruleLabel, actionId: ruleActionId })
+    if (!rule) { host.notify?.({ kind: 'error', message: 'Pick a label and an action' }); return }
+    persistLabelRules([...rules, rule])
+    setRuleLabel(''); setRuleActionId(''); setAddingRule(false)
+  }
+  const removeRule = id => persistLabelRules(rules.filter(r => r.id !== id))
+  const moveRule = (id, dir) => {
+    const idx = rules.findIndex(r => r.id === id)
+    const to = idx + dir
+    if (idx < 0 || to < 0 || to >= rules.length) return
+    const next = [...rules]
+    ;[next[idx], next[to]] = [next[to], next[idx]]
+    persistLabelRules(next)
+  }
+  const resetDefaults = () => {
+    persistActions(DEFAULT_ACTIONS)
+    persistLabelRules(DEFAULT_LABEL_RULES)
+    persistActionDefaults(DEFAULT_ACTION_DEFAULTS)
+  }
+
+  return jsxs('div', { className: 'flex h-full min-h-0 flex-col', children: [
+    jsxs('div', { className: 'shrink-0 border-b border-(--ui-stroke-secondary) bg-(--ui-editor-surface-background) px-3 py-2 flex items-center gap-1.5', children: [
+      jsx(Button, { variant: 'ghost', size: 'sm', className: 'h-7 w-7 p-0 -ml-1', onClick: onBack, 'aria-label': 'Back', children: jsx(Codicon, { name: 'chevron-left' }) }),
+      jsx('span', { className: 'text-sm font-semibold', children: 'Actions' }),
+      jsx(Button, { variant: 'ghost', size: 'sm', className: 'ml-auto h-7 px-2 text-[11px] text-(--ui-text-tertiary)', onClick: resetDefaults, children: 'Reset to defaults' }),
+    ] }),
+    jsx(ScrollArea, { className: 'flex-1 min-h-0', children: jsxs('div', { className: 'flex flex-col gap-4 p-3', children: [
+      // Actions list
+      jsxs('div', { children: [
+        jsxs('div', { className: 'mb-1.5 flex items-center justify-between', children: [
+          jsx('span', { className: 'text-[10px] font-semibold uppercase tracking-wide text-(--ui-text-tertiary)', children: 'Actions' }),
+          jsx(Button, { variant: 'ghost', size: 'sm', className: 'h-6 px-1.5 text-[11px]', onClick: () => setEditing({}), children: jsxs('span', { className: 'flex items-center gap-1', children: [jsx(Codicon, { name: 'plus', size: 11 }), 'New action'] }) }),
+        ] }),
+        jsx('div', { className: 'flex flex-col gap-1', children: actions.map(action => jsxs('div', {
+          className: 'flex items-center gap-2 rounded-md border border-(--ui-stroke-secondary) bg-(--ui-bg-quaternary) px-2.5 py-1.5',
+          children: [
+            jsx(Codicon, { name: 'tools', size: 12, className: 'shrink-0 text-(--ui-text-quaternary)' }),
+            jsxs('span', { className: 'min-w-0 flex-1', children: [
+              jsxs('span', { className: 'block truncate text-xs font-medium', children: [action.title, jsx('span', { className: 'ml-1.5 font-mono text-[10px] font-normal text-(--ui-text-quaternary)', children: `/${action.command}` })] }),
+              jsx('span', { className: 'block truncate text-[10px] text-(--ui-text-tertiary)', children: action.appliesTo.join(', ') + (action.requiresCheckout ? ' · needs checkout' : '') }),
+            ] }),
+            jsx(Button, { variant: 'ghost', size: 'sm', className: 'h-6 w-6 shrink-0 p-0', onClick: () => setEditing(action), 'aria-label': `Edit ${action.title}`, children: jsx(Codicon, { name: 'file', size: 12 }) }),
+            jsx(Button, {
+              variant: 'ghost', size: 'sm', className: 'h-6 w-6 shrink-0 p-0 text-(--ui-text-tertiary)',
+              onClick: () => deleteAction(action.id), 'aria-label': `Delete ${action.title}`,
+              children: jsx(icons.Trash2, { className: 'size-3' }),
+            }),
+          ],
+        }, action.id)) }),
+      ] }),
+      jsx(Separator, {}),
+      // Label rules: ordered, first match wins.
+      jsxs('div', { children: [
+        jsxs('div', { className: 'mb-1.5 flex items-center justify-between', children: [
+          jsxs('span', { className: 'text-[10px] font-semibold uppercase tracking-wide text-(--ui-text-tertiary)', children: ['Label rules', jsx(Tip, { label: 'First matching label wins. If none match, the per-kind default below runs.', children: jsx(Codicon, { name: 'error', size: 10, className: 'ml-1 opacity-60' }) })] }),
+          jsx(Button, { variant: 'ghost', size: 'sm', className: 'h-6 px-1.5 text-[11px]', onClick: () => setAddingRule(true), children: jsxs('span', { className: 'flex items-center gap-1', children: [jsx(Codicon, { name: 'plus', size: 11 }), 'New rule'] }) }),
+        ] }),
+        jsx('div', { className: 'flex flex-col gap-1', children: rules.map((rule, i) => jsxs('div', {
+          className: 'flex items-center gap-2 rounded-md border border-(--ui-stroke-secondary) bg-(--ui-bg-quaternary) px-2.5 py-1.5 text-xs',
+          children: [
+            jsx('span', { className: 'flex shrink-0 flex-col', children: [
+              jsx(Button, { variant: 'ghost', size: 'sm', className: 'h-4 w-4 p-0', disabled: i === 0, onClick: () => moveRule(rule.id, -1), 'aria-label': 'Move rule up', children: jsx(Codicon, { name: 'chevron-right', size: 9, className: '-rotate-90' }) }),
+              jsx(Button, { variant: 'ghost', size: 'sm', className: 'h-4 w-4 p-0', disabled: i === rules.length - 1, onClick: () => moveRule(rule.id, 1), 'aria-label': 'Move rule down', children: jsx(Codicon, { name: 'chevron-right', size: 9, className: 'rotate-90' }) }),
+            ] }),
+            jsx('span', { className: 'rounded bg-(--ui-bg-editor) px-1.5 py-0.5 font-mono text-[10px]', children: rule.label }),
+            jsx(Codicon, { name: 'chevron-right', size: 10, className: 'shrink-0 opacity-50' }),
+            jsx('span', { className: 'min-w-0 flex-1 truncate', children: findAction(actions, rule.actionId)?.title || jsx('span', { className: 'text-(--ui-text-quaternary)', children: '(deleted action)' }) }),
+            jsx(Button, { variant: 'ghost', size: 'sm', className: 'h-6 w-6 shrink-0 p-0 text-(--ui-text-tertiary)', onClick: () => removeRule(rule.id), 'aria-label': `Remove rule for ${rule.label}`, children: jsx(icons.Trash2, { className: 'size-3' }) }),
+          ],
+        }, rule.id)) }),
+        addingRule ? jsxs('div', { className: 'mt-1.5 flex items-center gap-1.5', children: [
+          jsx(Input, { className: 'h-7 flex-1 text-xs', placeholder: 'Label (e.g. bug)', value: ruleLabel, onChange: e => setRuleLabel(e.target.value) }),
+          jsxs(Select, { value: ruleActionId, onValueChange: setRuleActionId, children: [
+            jsx(SelectTrigger, { className: 'h-7 w-36 shrink-0 text-xs', children: jsx(SelectValue, { placeholder: 'Action' }) }),
+            jsx(SelectContent, { children: actions.map(a => jsx(SelectItem, { value: a.id, children: a.title }, a.id)) }),
+          ] }),
+          jsx(Button, { size: 'sm', className: 'h-7 shrink-0 px-2 text-xs', onClick: addRule, children: 'Add' }),
+          jsx(Button, { variant: 'ghost', size: 'sm', className: 'h-7 shrink-0 px-2 text-xs', onClick: () => { setAddingRule(false); setRuleLabel(''); setRuleActionId('') }, children: 'Cancel' }),
+        ] }) : null,
+      ] }),
+      jsx(Separator, {}),
+      // Per-kind fallback default, used only when no label rule matched.
+      jsxs('div', { children: [
+        jsx('div', { className: 'mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-(--ui-text-tertiary)', children: 'Default action (no label matched)' }),
+        jsxs('div', { className: 'flex flex-col gap-1.5', children: [
+          jsxs('div', { className: 'flex items-center gap-2', children: [
+            jsx('span', { className: 'w-14 shrink-0 text-xs text-(--ui-text-tertiary)', children: 'Issues' }),
+            jsxs(Select, {
+              value: defaults.issue || '__none__',
+              onValueChange: v => persistActionDefaults({ ...defaults, issue: v === '__none__' ? null : v }),
+              children: [
+                jsx(SelectTrigger, { className: 'h-7 flex-1 text-xs', children: jsx(SelectValue, {}) }),
+                jsxs(SelectContent, { children: [
+                  jsx(SelectItem, { value: '__none__', children: 'None' }, '__none__'),
+                  ...actions.filter(a => a.appliesTo.includes('issue')).map(a => jsx(SelectItem, { value: a.id, children: a.title }, a.id)),
+                ] }),
+              ],
+            }),
+          ] }),
+          jsxs('div', { className: 'flex items-center gap-2', children: [
+            jsx('span', { className: 'w-14 shrink-0 text-xs text-(--ui-text-tertiary)', children: 'PRs' }),
+            jsxs(Select, {
+              value: defaults.pr || '__none__',
+              onValueChange: v => persistActionDefaults({ ...defaults, pr: v === '__none__' ? null : v }),
+              children: [
+                jsx(SelectTrigger, { className: 'h-7 flex-1 text-xs', children: jsx(SelectValue, {}) }),
+                jsxs(SelectContent, { children: [
+                  jsx(SelectItem, { value: '__none__', children: 'None' }, '__none__'),
+                  ...actions.filter(a => a.appliesTo.includes('pr')).map(a => jsx(SelectItem, { value: a.id, children: a.title }, a.id)),
+                ] }),
+              ],
+            }),
+          ] }),
+        ] }),
+      ] }),
+    ] }) }),
+    editing ? jsx(ActionEditDialog, { action: editing, onSave: saveAction, onClose: () => setEditing(null) }) : null,
+  ] })
+}
+
+// Edit/create dialog for a single Action. `editing.id` is empty for a new
+// action (title/command are still required before Save is enabled).
+function ActionEditDialog({ action, onSave, onClose }) {
+  const isNew = !action?.id
+  const [title, setTitle] = useState(action?.title || '')
+  const [command, setCommand] = useState(action?.command || '')
+  const [instruction, setInstruction] = useState(action?.instruction || '')
+  const [appliesIssue, setAppliesIssue] = useState(isNew ? true : action.appliesTo.includes('issue'))
+  const [appliesPr, setAppliesPr] = useState(isNew ? false : action.appliesTo.includes('pr'))
+  const [requiresCheckout, setRequiresCheckout] = useState(!!action?.requiresCheckout)
+  const appliesTo = [appliesIssue && 'issue', appliesPr && 'pr'].filter(Boolean)
+  const canSave = title.trim() && command.trim() && appliesTo.length > 0
+  return jsx(Dialog, { open: true, onOpenChange: open => { if (!open) onClose() }, children: jsxs(DialogContent, { className: 'sm:max-w-md', children: [
+    jsx(DialogHeader, { children: jsx(DialogTitle, { children: isNew ? 'New action' : `Edit "${action.title}"` }) }),
+    jsxs('div', { className: 'flex flex-col gap-3 py-1', children: [
+      jsxs('div', { children: [
+        jsx('label', { className: 'mb-1 block text-xs font-medium', children: 'Title' }),
+        jsx(Input, { value: title, onChange: e => setTitle(e.target.value), placeholder: 'e.g. Diagnose' }),
+      ] }),
+      jsxs('div', { children: [
+        jsx('label', { className: 'mb-1 block text-xs font-medium', children: 'Skill command' }),
+        jsx(Input, { value: command, onChange: e => setCommand(e.target.value.replace(/^\//, '')), placeholder: 'diagnose (runs /diagnose)' }),
+      ] }),
+      jsxs('div', { children: [
+        jsx('label', { className: 'mb-1 block text-xs font-medium', children: 'Instruction' }),
+        jsx(Textarea, { value: instruction, onChange: e => setInstruction(e.target.value), rows: 3, placeholder: 'Read the issue and its comments, then…' }),
+        jsx('span', { className: 'mt-1 block text-[10px] text-(--ui-text-quaternary)', children: 'The issue/PR link and the untrusted-content warning are added automatically.' }),
+      ] }),
+      jsxs('div', { children: [
+        jsx('label', { className: 'mb-1 block text-xs font-medium', children: 'Applies to' }),
+        jsxs('div', { className: 'flex items-center gap-4', children: [
+          jsxs('label', { className: 'flex items-center gap-1.5 text-xs', children: [jsx(Checkbox, { checked: appliesIssue, onCheckedChange: v => setAppliesIssue(!!v) }), 'Issues'] }),
+          jsxs('label', { className: 'flex items-center gap-1.5 text-xs', children: [jsx(Checkbox, { checked: appliesPr, onCheckedChange: v => setAppliesPr(!!v) }), 'Pull requests'] }),
+        ] }),
+      ] }),
+      jsxs('label', { className: 'flex items-center gap-1.5 text-xs', children: [
+        jsx(Checkbox, { checked: requiresCheckout, onCheckedChange: v => setRequiresCheckout(!!v) }),
+        'Needs a checkout (blocks the action until a session is open in this repo — use for anything that writes code)',
+      ] }),
+    ] }),
+    jsxs(DialogFooter, { children: [
+      jsx(Button, { variant: 'ghost', onClick: onClose, children: 'Cancel' }),
+      jsx(Button, {
+        disabled: !canSave,
+        onClick: () => onSave({
+          id: action?.id || command.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || `action-${Date.now()}`,
+          title: title.trim(), command: command.trim(), instruction: instruction.trim(),
+          appliesTo, requiresCheckout, builtin: !!action?.builtin,
+        }),
+        children: 'Save',
+      }),
+    ] }),
+  ] }) })
+}
+
 function GitHubPane() {
   const { reposQ, repo, repoOptions, tab, query, selPr, selIssue } = useGitHubShellState()
   const paneVisible = useValue(typeof host.paneVisibility === 'function' ? host.paneVisibility(PANE_ID) : $alwaysVisible)
   const keyboard = useListKeyboardFlow(query)
+  const settingsOpen = useValue($paneActionsSettingsOpen)
 
   const showPr = tab === 'prs' && selPr != null
   const showIssue = tab === 'issues' && selIssue != null
 
-  if (showPr) return jsx(PrDetail, { repo, number: selPr, active: paneVisible, onBack: () => $selPr.set(null) })
-  if (showIssue) return jsx(IssueDetail, { repo, number: selIssue, active: paneVisible, onBack: () => $selIssue.set(null) })
+  if (settingsOpen) return jsx(ActionsSettings, { onBack: () => $paneActionsSettingsOpen.set(false) })
+  if (showPr) return jsx(PrDetail, { repo, number: selPr, active: paneVisible, onBack: () => $selPr.set(null), onOpenSettings: () => $paneActionsSettingsOpen.set(true) })
+  if (showIssue) return jsx(IssueDetail, { repo, number: selIssue, active: paneVisible, onBack: () => $selIssue.set(null), onOpenSettings: () => $paneActionsSettingsOpen.set(true) })
 
   if (reposQ.isError) {
     return jsx('div', { className: 'p-6', children: jsx(GhErrorState, { title: 'Could not load repositories', error: reposQ.error, onRetry: () => reposQ.refetch() }) })
@@ -3832,7 +4298,8 @@ function GitHubPane() {
               reposQ.isLoading
                 ? jsx(Skeleton, { className: 'h-8 flex-1 rounded-md' })
                 : jsx('div', { className: 'min-w-0 flex-1', children: jsx(RepoPicker, { repos: repoOptions, value: repo, onChange: v => $repo.set(v) }) }),
-              jsx(Button, { variant: 'ghost', size: 'sm', className: 'h-7 w-7 p-0 ml-auto', onClick: () => queryClient.invalidateQueries({ queryKey: [ID] }), 'aria-label': 'Refresh GitHub data', children: jsx(icons.RefreshCw, { className: 'size-3' }) }),
+              jsx(Button, { variant: 'ghost', size: 'sm', className: 'h-7 w-7 p-0 ml-auto', onClick: () => $paneActionsSettingsOpen.set(true), 'aria-label': 'Manage actions', children: jsx(Codicon, { name: 'settings-gear', className: 'size-3' }) }),
+              jsx(Button, { variant: 'ghost', size: 'sm', className: 'h-7 w-7 p-0', onClick: () => queryClient.invalidateQueries({ queryKey: [ID] }), 'aria-label': 'Refresh GitHub data', children: jsx(icons.RefreshCw, { className: 'size-3' }) }),
             ],
           }),
           jsx(Separator, { className: 'my-3' }),
@@ -3872,11 +4339,13 @@ function GitHubPane() {
 function GithubPage() {
   const { reposQ, repo, repoOptions, tab, query, selPr, selIssue } = useGitHubShellState()
   const keyboard = useListKeyboardFlow(query)
+  const settingsOpen = useValue($pageActionsSettingsOpen)
 
   const showPr = tab === 'prs' && selPr != null
   const showIssue = tab === 'issues' && selIssue != null
-  if (showPr) return jsx(PrDetail, { repo, number: selPr, onBack: () => $selPr.set(null) })
-  if (showIssue) return jsx(IssueDetail, { repo, number: selIssue, onBack: () => $selIssue.set(null) })
+  if (settingsOpen) return jsx(ActionsSettings, { onBack: () => $pageActionsSettingsOpen.set(false) })
+  if (showPr) return jsx(PrDetail, { repo, number: selPr, onBack: () => $selPr.set(null), onOpenSettings: () => $pageActionsSettingsOpen.set(true) })
+  if (showIssue) return jsx(IssueDetail, { repo, number: selIssue, onBack: () => $selIssue.set(null), onOpenSettings: () => $pageActionsSettingsOpen.set(true) })
 
   if (reposQ.isError) {
     return jsx('div', { className: 'mx-auto w-full max-w-[1020px] p-6', children: jsx(GhErrorState, { title: 'Could not load repositories', error: reposQ.error, onRetry: () => reposQ.refetch() }) })
@@ -3898,7 +4367,8 @@ function GithubPage() {
                 children: [
                   jsxs('span', { className: 'flex items-center gap-2 text-sm font-semibold', children: [jsx(Codicon, { name: 'github' }), 'GitHub'] }),
                   jsx('span', { className: 'text-xs text-(--ui-text-quaternary)', children: repo || '—' }),
-                  jsx(Button, { variant: 'ghost', size: 'sm', className: 'ml-auto h-7 w-7 p-0', onClick: () => queryClient.invalidateQueries({ queryKey: [ID] }), 'aria-label': 'Refresh', children: jsx(icons.RefreshCw, { className: 'size-3' }) }),
+                  jsx(Button, { variant: 'ghost', size: 'sm', className: 'ml-auto h-7 w-7 p-0', onClick: () => $pageActionsSettingsOpen.set(true), 'aria-label': 'Manage actions', children: jsx(Codicon, { name: 'settings-gear', className: 'size-3' }) }),
+                  jsx(Button, { variant: 'ghost', size: 'sm', className: 'h-7 w-7 p-0', onClick: () => queryClient.invalidateQueries({ queryKey: [ID] }), 'aria-label': 'Refresh', children: jsx(icons.RefreshCw, { className: 'size-3' }) }),
                   jsx(Button, { variant: 'ghost', size: 'sm', className: 'h-7 px-2 text-xs', onClick: openGithubPane, children: 'Open pane' }),
                 ],
               }),
@@ -3942,7 +4412,7 @@ function GithubPage() {
 
 export default {
   id: ID,
-  name: 'GitHermes',
+  name: 'GH Actions Pane',
   register(ctx) {
     pluginCtx = ctx
     // Start the shared probe; shellCommand awaits it before any command runs.
@@ -3951,8 +4421,15 @@ export default {
     if (saved) $repo.set(saved)
     const assignments = ctx.storage.get('botAssignments', {})
     if (assignments && typeof assignments === 'object' && !Array.isArray(assignments)) $botAssignments.set(assignments)
+    // Actions/rules/defaults: normalize on load so a hand-edited or older-shape
+    // storage blob can never crash the pane — malformed entries just drop out.
+    const storedActions = normalizeActions(ctx.storage.get(ACTIONS_STORAGE_KEY, DEFAULT_ACTIONS))
+    $actions.set(storedActions.length ? storedActions : DEFAULT_ACTIONS)
+    const storedRules = normalizeLabelRules(ctx.storage.get(LABEL_RULES_STORAGE_KEY, DEFAULT_LABEL_RULES))
+    $labelRules.set(storedRules)
+    $actionDefaults.set(normalizeActionDefaults(ctx.storage.get(ACTION_DEFAULTS_STORAGE_KEY, DEFAULT_ACTION_DEFAULTS)))
 
-    const paneWrap = () => jsxs('div', { className: 'githermes-pane h-full min-h-0 min-w-0 max-w-full overflow-hidden', children: [
+    const paneWrap = () => jsxs('div', { className: 'gh-actions-pane h-full min-h-0 min-w-0 max-w-full overflow-hidden', children: [
       jsx('style', { children: PANE_WRAP_CSS }),
       jsxs('div', { className: 'gh-narrow-only h-full flex-col items-center justify-center gap-2 px-2 text-center text-(--ui-text-quaternary)', children: [
         jsx(Codicon, { name: 'github', className: 'text-base' }),
@@ -3960,7 +4437,7 @@ export default {
       ] }),
       jsx('div', { className: 'gh-pane-content h-full min-h-0', children: jsx(GitHubPane, {}) }),
     ] })
-    const pageShell = () => jsxs('div', { className: 'githermes-pane h-full min-h-0 min-w-0 max-w-full overflow-hidden bg-(--ui-editor-surface-background)', children: [jsx('style', { children: PANE_WRAP_CSS }), jsx(GithubPage, {})] })
+    const pageShell = () => jsxs('div', { className: 'gh-actions-pane h-full min-h-0 min-w-0 max-w-full overflow-hidden bg-(--ui-editor-surface-background)', children: [jsx('style', { children: PANE_WRAP_CSS }), jsx(GithubPage, {})] })
 
     ctx.register({
       id: 'pane',
@@ -3992,12 +4469,12 @@ export default {
     ctx.register({
       id: 'palette',
       area: PALETTE_AREA,
-      data: { id: 'githermes.open', label: 'Open GitHub pane', keywords: ['github', 'pr', 'issue', 'pull request'], run: openGithubPane },
+      data: { id: 'gh-actions-pane.open', label: 'Open GitHub pane', keywords: ['github', 'pr', 'issue', 'pull request'], run: openGithubPane },
     })
     ctx.register({
       id: 'palette-page',
       area: PALETTE_AREA,
-      data: { id: 'githermes.open-page', label: 'GitHub: Open page', keywords: ['github', 'page', 'pr', 'issue'], run: openGithubPage },
+      data: { id: 'gh-actions-pane.open-page', label: 'GitHub: Open page', keywords: ['github', 'page', 'pr', 'issue'], run: openGithubPage },
     })
     ctx.register({ id: 'titlebar-github', area: TITLEBAR_AREAS.right, order: 20, render: () => jsx(TitlebarGithubButton, {}) })
     ctx.register({ id: 'statusbar-session-branch', area: STATUSBAR_AREAS.right, order: 84, render: () => jsx(SessionBranchStatus, {}) })

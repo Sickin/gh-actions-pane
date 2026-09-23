@@ -92,7 +92,9 @@ test('Assign to a Bot is wired on loaded PR and issue details', () => {
   assert.ok(source.includes('function AssignToBot({ kind, repo, number })'))
   assert.ok(toolbar.includes('jsx(AssignToBot, { kind, repo, number })'))
   assert.ok(source.includes("title: d.title, kind: 'pr', checkoutCommand"))
-  assert.ok(source.includes("title: d.title, kind: 'issue', onBack"))
+  // issue detail now also threads its labels through so the Action button can
+  // resolve a label rule; the literal call site grew accordingly.
+  assert.ok(source.includes("title: d.title, kind: 'issue', labels: d.labels, onBack"))
   assert.ok(source.includes('assignToBot(host, buildAssignPlan('))
   // fix(assign): cwd of the checked-out repo flows into buildAssignPlan (#60 review)
   assert.ok(assign.includes('useSessionGit(cwd)'))
@@ -188,31 +190,34 @@ test('Issue #64 review: a pending manual check cannot revert a newer repo', () =
   assert.ok(guard >= 0 && guard < apply, 'stale-completion guard must run before onChange')
 })
 
-test('Implement is wired on the issue list and the issue detail', () => {
-  const issues = source.slice(source.indexOf('function IssueList'), source.indexOf('// Implement action'))
-  const btn = source.slice(source.indexOf('function ImplementButton'), source.indexOf('function AssignToBot'))
+test('Actions (generic Implement/Triage/etc) are wired on the issue list and the issue detail', () => {
+  const issues = source.slice(source.indexOf('function IssueList'), source.indexOf('// Generic Action button'))
+  const btn = source.slice(source.indexOf('function ActionButton'), source.indexOf('// Implement action retained'))
   const toolbar = source.slice(source.indexOf('function DetailToolbar'), source.indexOf('function DetailSummary'))
   const shell = source.slice(source.indexOf('function useGitHubShellState'), source.indexOf('function useListKeyboardFlow'))
 
-  // Both entry points build the SAME plan, so one seam governs both.
-  assert.ok(btn.includes('buildImplementPlan({'), 'button must build the plan')
-  assert.ok(btn.includes('implementIssues(host, plan)'), 'button must run through the tested chain')
-  // cwd of the checked-out repo is what makes /implement edit the right tree.
+  // Both entry points go through the same generic engine, so one seam governs both.
+  assert.ok(btn.includes('buildActionPlan({'), 'button must build the plan')
+  assert.ok(btn.includes('runAction(host, buildActionPlan('), 'button must run through the tested chain')
+  // Resolution order: label rule beats the per-kind default.
+  assert.ok(btn.includes('resolveActionId({ labels, kind, rules, defaults })'))
+  // cwd of the checked-out repo is what makes a requiresCheckout action edit the right tree.
   assert.ok(btn.includes('useSessionGit(cwd)'))
   assert.ok(btn.includes('sessionRepo: sessionGitQ.data?.repo'))
   assert.ok(btn.includes('sessionCwd: cwd'))
   // A blocked plan disables the control and explains itself, never hides.
   assert.ok(btn.includes('disabled: run.isPending || blocked'))
-  assert.ok(btn.includes('title: plan.error'))
+  assert.ok(btn.includes('title: primaryPlan.error'))
 
-  // Issue detail: one issue. PRs must NOT offer it (/implement targets issues).
-  assert.ok(toolbar.includes("kind === 'issue' ? jsx(ImplementButton, { repo, numbers: [number], label: 'Implement' }) : null"))
+  // Issue detail AND PR detail both offer the Action button now (Triage/Review
+  // apply to PRs too); only the bot assign stays kind-gated separately.
+  assert.ok(toolbar.includes("(kind === 'issue' || kind === 'pr') ? jsx(ActionButton, { repo, numbers: [number], kind, labels }) : null"))
 
   // List: checkbox selection + action bar, and selecting must not navigate.
   assert.ok(issues.includes("type: 'checkbox'"), 'rows need a selection checkbox')
   assert.ok(issues.includes('onClick: event => event.stopPropagation()'), 'checkbox must not open the row')
   assert.ok(issues.includes('toggleIssueSelection($issueSelection.get(), repo, it.number)'))
-  assert.ok(issues.includes('jsx(ImplementButton, { repo, numbers: selected'), 'action bar must run the batch')
+  assert.ok(issues.includes("jsx(ActionButton, { repo, numbers: selected, kind: 'issue'"), 'action bar must run the batch')
   assert.ok(issues.includes("children: 'Clear'"), 'action bar needs a clear')
   assert.ok(issues.includes('selectedIssueNumbers(selection, repo)'), 'selection must be filtered to this repo')
   // The bar is opt-in: no selection, no change to the list.
@@ -222,6 +227,41 @@ test('Implement is wired on the issue list and the issue detail', () => {
   assert.ok(shell.includes('$issueSelection.set([])'), 'repo change must clear the selection')
   const filter = source.slice(source.indexOf('const value = useValue(isPr ? $prState : $issueState)'), source.indexOf('function ListMoreFooter'))
   assert.ok(filter.includes('if (!isPr) $issueSelection.set([])'), 'state filter change must clear the selection')
+})
+
+test('A single issue can be actioned from its list row without selecting it', () => {
+  const issues = source.slice(source.indexOf('function IssueList'), source.indexOf('// Generic Action button'))
+  const btn = source.slice(source.indexOf('function ActionButton'), source.indexOf('// Implement action retained'))
+
+  // The row action targets exactly the row's own issue — not the checkbox
+  // selection, which is what made a single issue cost two clicks.
+  assert.ok(
+    issues.includes("jsx(ActionButton, { repo, numbers: [it.number], kind: 'issue', labels: it.labels, iconOnly: true })"),
+    'each issue row must offer an action for its own number',
+  )
+
+  // The row action sits INSIDE the row's open-target, so it must swallow the
+  // click; otherwise firing it also navigates into the detail view.
+  assert.ok(btn.includes('onClick: event => {'), 'row action must receive the event')
+  assert.ok(btn.includes('event.stopPropagation()'), 'row action must not open the row')
+  assert.ok(btn.includes('if (!blocked) run.mutate(resolved)'), 'blocked plans still must not run')
+
+  // A resolved action with no other applicable actions renders as a plain
+  // button — the split chevron only appears when there is something to split.
+  assert.ok(btn.includes('if (!others.length) return primaryBtn'))
+
+  // Icon-only collapses the label, never the accessible name or the tooltip:
+  // a bare icon with no aria-label is unusable by keyboard and screen reader.
+  assert.ok(btn.includes("'aria-label': iconOnly ?"), 'icon-only needs an accessible name')
+  assert.ok(btn.includes('title: primaryPlan.error ||'), 'icon-only needs a tooltip')
+
+  // Hover-only affordances are unreachable by keyboard and on touch, so the
+  // control must stay in the tree — styling may fade it, CSS must not remove it.
+  const cssStart = source.indexOf('.gh-actions-pane .gh-row-action')
+  const css = source.slice(cssStart, source.indexOf('.gh-actions-pane .gh-empty {', cssStart))
+  assert.ok(css.includes('gh-row-action'), 'row action must be styled')
+  assert.ok(!/display:\s*none/.test(css), 'row action must not be display:none when unhovered')
+  assert.ok(css.includes(':focus-visible'), 'row action must surface on keyboard focus')
 })
 
 test('Per-list caps: PRs stay lower because their rows are unbounded', () => {
@@ -242,13 +282,17 @@ test('The untrusted-content rule is single-sourced', () => {
     'the rule text must exist exactly once, in UNTRUSTED_CONTENT_RULE')
   assert.ok(source.includes('const UNTRUSTED_CONTENT_RULE ='))
   const assign = source.slice(source.indexOf('export function buildAssignPlan'), source.indexOf('export async function assignToBot'))
-  const impl = source.slice(source.indexOf('export function buildImplementPlan'), source.indexOf('export function isMissingCommandError'))
+  // buildImplementPlan is now a thin wrapper over buildActionPlan; the rule
+  // itself lives in the generic engine both it and every custom action share.
+  const engine = source.slice(source.indexOf('export function buildActionPlan'), source.indexOf('export function isMissingCommandError'))
   assert.ok(assign.includes('UNTRUSTED_CONTENT_RULE'), 'assign prompt must use the shared rule')
-  assert.ok(impl.includes('UNTRUSTED_CONTENT_RULE'), 'implement prompt must use the shared rule')
+  assert.ok(engine.includes('UNTRUSTED_CONTENT_RULE'), 'action-plan prompt must use the shared rule')
 })
 
 test('Implement expands the skill server-side rather than typing a slash command', () => {
-  const runFn = source.slice(source.indexOf('export async function implementIssues'))
+  // implementIssues is now a thin wrapper; the actual dispatch chain lives in
+  // the shared runAction, which every action (built-in or custom) goes through.
+  const runFn = source.slice(source.indexOf('export async function runAction'))
   const body = runFn.slice(0, runFn.indexOf('\n}\n'))
   // prompt.submit does NOT parse slash commands (the desktop client does), so
   // submitting "/implement …" as text would send literal characters to the model.
@@ -257,6 +301,8 @@ test('Implement expands the skill server-side rather than typing a slash command
   assert.ok(body.includes('session_id: runtime'), 'dispatch must bind to the new session')
   // A backend without the skill still gets the work.
   assert.ok(body.includes('let text = plan.arg'), 'must fall back to the raw instruction')
+  // The public wrapper other code/tests still call must delegate, not duplicate.
+  assert.ok(source.includes('export async function implementIssues(api, plan) {\n  return runAction(api, plan)\n}'))
 })
 
 test('Issue #55: lists cap explicitly and load more on demand', () => {
@@ -379,6 +425,63 @@ test('Merged transcript PRs unlink: session falls back until the next PR', () =>
 test('Session queries re-poll so opened/merged PRs surface without refocus', () => {
   const hook = source.slice(source.indexOf('function useSessionGit'), source.indexOf('function StateDot'))
   assert.equal((hook.match(/refetchInterval: MEDIUM_POLL_MS/g) || []).length, 3)
+})
+
+test('Actions settings: register() hydrates storage before anything reads it', () => {
+  const register = source.slice(source.indexOf('register(ctx) {'), source.indexOf('const paneWrap ='))
+  // Malformed/older-shape storage must normalize, never crash the pane.
+  assert.ok(register.includes('normalizeActions(ctx.storage.get(ACTIONS_STORAGE_KEY, DEFAULT_ACTIONS))'))
+  assert.ok(register.includes('normalizeLabelRules(ctx.storage.get(LABEL_RULES_STORAGE_KEY, DEFAULT_LABEL_RULES))'))
+  assert.ok(register.includes('normalizeActionDefaults(ctx.storage.get(ACTION_DEFAULTS_STORAGE_KEY, DEFAULT_ACTION_DEFAULTS))'))
+  // An empty normalized action list (e.g. corrupted storage) must fall back to
+  // the built-ins, or the pane would render zero actions with no way to add one.
+  assert.ok(register.includes('storedActions.length ? storedActions : DEFAULT_ACTIONS'))
+})
+
+test('Actions settings: gear button opens the overlay from both the pane and the page, independently', () => {
+  const pane = source.slice(source.indexOf('function GitHubPane()'), source.indexOf('function GithubPage()'))
+  const page = source.slice(source.indexOf('function GithubPage()'), source.indexOf('export default'))
+  // Regression: a single shared "settings open" flag left the OTHER mounted
+  // surface stuck on/off Settings whenever either gear was clicked, since the
+  // pane and the page route can both be mounted at once. Each surface must
+  // own its own flag.
+  assert.ok(pane.includes('$paneActionsSettingsOpen.set(true)'), 'pane: gear must open the pane-scoped overlay')
+  assert.ok(pane.includes('useValue($paneActionsSettingsOpen)'), 'pane: must read its own flag')
+  assert.ok(!pane.includes('$pageActionsSettingsOpen'), 'pane must not touch the page flag')
+  assert.ok(page.includes('$pageActionsSettingsOpen.set(true)'), 'page: gear must open the page-scoped overlay')
+  assert.ok(page.includes('useValue($pageActionsSettingsOpen)'), 'page: must read its own flag')
+  assert.ok(!page.includes('$paneActionsSettingsOpen'), 'page must not touch the pane flag')
+  for (const [name, view] of [['pane', pane], ['page', page]]) {
+    assert.ok(view.includes('jsx(ActionsSettings, { onBack:'), `${name}: overlay must render in the same slot as list/detail`)
+  }
+  // Settings must take priority over an open PR/issue detail — checking it
+  // before showPr/showIssue in both views is what makes the gear always work.
+  const paneOrder = pane.indexOf('if (settingsOpen)')
+  const panePr = pane.indexOf('if (showPr)')
+  assert.ok(paneOrder >= 0 && paneOrder < panePr, 'settings check must come before the detail-view checks')
+})
+
+test('Actions settings: editing/deleting an action keeps rules and defaults consistent', () => {
+  const settings = source.slice(source.indexOf('function ActionsSettings'), source.indexOf('function ActionEditDialog'))
+  // Delete cascades: a rule or default pointing at a removed action must be
+  // cleaned up too, or Settings would show "(deleted action)" silently forever
+  // with no way to know WHY an action stopped taking effect.
+  assert.ok(settings.includes('persistLabelRules(rules.filter(r => r.actionId !== id))'))
+  assert.ok(settings.includes('defaults.issue === id || defaults.pr === id'))
+  // Reset restores all three stores together, not just the action list.
+  const reset = settings.slice(settings.indexOf('const resetDefaults'), settings.indexOf('return jsxs'))
+  assert.ok(reset.includes('persistActions(DEFAULT_ACTIONS)'))
+  assert.ok(reset.includes('persistLabelRules(DEFAULT_LABEL_RULES)'))
+  assert.ok(reset.includes('persistActionDefaults(DEFAULT_ACTION_DEFAULTS)'))
+})
+
+test('Actions settings: the edit dialog requires title, command, and at least one scope', () => {
+  const dialog = source.slice(source.indexOf('function ActionEditDialog'), source.length)
+  assert.ok(dialog.includes('const canSave = title.trim() && command.trim() && appliesTo.length > 0'))
+  assert.ok(dialog.includes('disabled: !canSave'))
+  // A leading slash typed into the command field must not double up with the
+  // one buildActionPlan already strips.
+  assert.ok(dialog.includes("setCommand(e.target.value.replace(/^\\//, ''))"))
 })
 
 test('Cross-repo session-PR navigation keeps the just-set selection', () => {
