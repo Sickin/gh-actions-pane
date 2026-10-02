@@ -521,10 +521,15 @@ export function selectedIssueNumbers(selection, repo) {
 // The plan only names the command and the instruction; the backend expands
 // the skill itself (command.dispatch, skill stage), so nothing here duplicates
 // the skill's text.
-// Board slug for a repo's Kanban board: the repo half only (never owner/repo,
-// so forks/renames of the same upstream share one board on purpose), lowercased
-// and slugified to satisfy `hermes kanban boards create`'s kebab-case rule.
-export function repoBoardSlug(repo) {
+// Board slug for a repo's Kanban board. 'per-repo' mode (default): the repo
+// half only (never owner/repo, so forks/renames of the same upstream share one
+// board on purpose), lowercased and slugified to satisfy `hermes kanban boards
+// create`'s kebab-case rule. 'shared' mode: every repo routes to the same
+// user-named board (boardSetting.sharedBoard), already slugified by
+// normalizeKanbanBoardSetting.
+export function repoBoardSlug(repo, boardSetting) {
+  const setting = normalizeKanbanBoardSetting(boardSetting)
+  if (setting.mode === 'shared') return setting.sharedBoard
   const repoName = String(repo || '').trim()
   const m = repoName.match(/^[^/]+\/(.+)$/)
   const base = (m ? m[1] : repoName).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
@@ -538,7 +543,7 @@ export function issueTaskIdempotencyKey(repo, number) {
   return `gh:${String(repo || '').trim().toLowerCase()}#${Number(number)}`
 }
 
-export function buildActionPlan({ action, numbers, repo, kind = 'issue', sessionRepo, sessionCwd } = {}) {
+export function buildActionPlan({ action, numbers, repo, kind = 'issue', sessionRepo, sessionCwd, kanbanBoardSetting } = {}) {
   if (!action || !String(action.command || '').trim()) return { error: 'No action selected' }
   const repoName = String(repo || '').trim()
   if (!repoOk(repoName)) return { error: 'Missing or invalid repository' }
@@ -583,6 +588,7 @@ export function buildActionPlan({ action, numbers, repo, kind = 'issue', session
     // Kanban at all — only issue-kind actions get linked (#GH-kanban).
     kind,
     repo: repoName,
+    kanbanBoardSetting: normalizeKanbanBoardSetting(kanbanBoardSetting),
   }
 }
 
@@ -619,12 +625,12 @@ async function shJsonVia(api, cmd) {
 // Best-effort by design: every call in here is allowed to fail without ever
 // surfacing to the user, so a broken `hermes` CLI or an unreachable kanban.db
 // never turns a successful Implement dispatch into a reported failure.
-export async function linkIssuesToKanban(api, { repo, numbers, sessionId } = {}) {
+export async function linkIssuesToKanban(api, { repo, numbers, sessionId, boardSetting } = {}) {
   const repoName = String(repo || '').trim()
   if (!repoOk(repoName)) return []
   const list = (Array.isArray(numbers) ? numbers : []).filter(n => Number.isInteger(n) && n > 0)
   if (!list.length) return []
-  const board = repoBoardSlug(repoName)
+  const board = repoBoardSlug(repoName, boardSetting)
   const results = []
   try {
     await shVia(api, `${HERMES} kanban boards create ${sq(board)} --name ${sq(repoName)}`)
@@ -697,7 +703,7 @@ export async function runAction(api, plan) {
   // action-dispatch failure; the session already started successfully.
   let kanban = []
   if (plan.kind !== 'pr' && Array.isArray(plan.numbers) && plan.numbers.length) {
-    kanban = await linkIssuesToKanban(api, { repo: plan.repo, numbers: plan.numbers, sessionId: runtime }).catch(() => [])
+    kanban = await linkIssuesToKanban(api, { repo: plan.repo, numbers: plan.numbers, sessionId: runtime, boardSetting: plan.kanbanBoardSetting }).catch(() => [])
   }
   return { session_id: runtime, stored_session_id: stored, skillExpanded, kanban }
 }
@@ -819,12 +825,28 @@ export function normalizeActionDefaults(raw) {
   return { issue: pick(src.issue), pr: pick(src.pr) }
 }
 
+// Kanban board-routing setting (#GH-kanban): 'per-repo' (default, one board per
+// repo, slug = repo name) or 'shared' (every repo's linked issues land on one
+// user-named board). Tolerant of a missing/malformed stored value the same way
+// every other settings blob in this file is — an unrecognized mode or an empty
+// shared slug falls back to the safe per-repo default rather than crashing.
+const KANBAN_BOARD_MODE_DEFAULT = { mode: 'per-repo', sharedBoard: 'all-repos' }
+export function normalizeKanbanBoardSetting(raw) {
+  const src = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {}
+  const mode = src.mode === 'shared' ? 'shared' : 'per-repo'
+  const sharedBoard = (typeof src.sharedBoard === 'string' && src.sharedBoard.trim())
+    ? src.sharedBoard.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
+    : KANBAN_BOARD_MODE_DEFAULT.sharedBoard
+  return { mode, sharedBoard: sharedBoard || KANBAN_BOARD_MODE_DEFAULT.sharedBoard }
+}
+
 // Named settings-storage keys, single-sourced so the register() hydration and
 // every write site agree on spelling.
 const ACTIONS_STORAGE_KEY = 'actions'
 const LABEL_RULES_STORAGE_KEY = 'labelRules'
 const ACTION_DEFAULTS_STORAGE_KEY = 'actionDefaults'
 const LIST_FILTERS_STORAGE_KEY = 'listFilters'
+const KANBAN_BOARD_SETTING_STORAGE_KEY = 'kanbanBoardSetting'
 
 // User-editable Actions (named prompt templates run against issues/PRs) and
 // the label -> action routing rules, plus per-kind fallback defaults. Seeded
@@ -834,6 +856,7 @@ const LIST_FILTERS_STORAGE_KEY = 'listFilters'
 const $actions = atom(DEFAULT_ACTIONS)
 const $labelRules = atom(DEFAULT_LABEL_RULES)
 const $actionDefaults = atom(DEFAULT_ACTION_DEFAULTS)
+const $kanbanBoardSetting = atom(KANBAN_BOARD_MODE_DEFAULT)
 
 function persistActions(next) {
   $actions.set(next)
@@ -846,6 +869,11 @@ function persistLabelRules(next) {
 function persistActionDefaults(next) {
   $actionDefaults.set(next)
   pluginCtx?.storage.set(ACTION_DEFAULTS_STORAGE_KEY, next)
+}
+function persistKanbanBoardSetting(next) {
+  const normalized = normalizeKanbanBoardSetting(next)
+  $kanbanBoardSetting.set(normalized)
+  pluginCtx?.storage.set(KANBAN_BOARD_SETTING_STORAGE_KEY, normalized)
 }
 
 
@@ -3562,6 +3590,7 @@ function ActionButton({ repo, numbers, kind = 'issue', labels, onDone, variant =
       action, numbers, repo, kind,
       sessionRepo: sessionGitQ.data?.repo,
       sessionCwd: cwd,
+      kanbanBoardSetting: $kanbanBoardSetting.get(),
     })),
     onMutate: action => setPendingAction(action.id),
     onSuccess: (result, action) => {
@@ -4342,10 +4371,12 @@ function ActionsSettings({ onBack }) {
   const actions = useValue($actions)
   const rules = useValue($labelRules)
   const defaults = useValue($actionDefaults)
+  const kanbanSetting = useValue($kanbanBoardSetting)
   const [editing, setEditing] = useState(null) // action object, or {} for new
   const [addingRule, setAddingRule] = useState(false)
   const [ruleLabel, setRuleLabel] = useState('')
   const [ruleActionId, setRuleActionId] = useState('')
+  const [sharedBoardDraft, setSharedBoardDraft] = useState(kanbanSetting.sharedBoard)
 
   const saveAction = next => {
     const normalized = normalizeAction(next)
@@ -4383,6 +4414,8 @@ function ActionsSettings({ onBack }) {
     persistActions(DEFAULT_ACTIONS)
     persistLabelRules(DEFAULT_LABEL_RULES)
     persistActionDefaults(DEFAULT_ACTION_DEFAULTS)
+    persistKanbanBoardSetting(KANBAN_BOARD_MODE_DEFAULT)
+    setSharedBoardDraft(KANBAN_BOARD_MODE_DEFAULT.sharedBoard)
   }
 
   return jsxs('div', { className: 'flex h-full min-h-0 flex-col', children: [
@@ -4478,6 +4511,43 @@ function ActionsSettings({ onBack }) {
               ],
             }),
           ] }),
+        ] }),
+      ] }),
+      jsx(Separator, {}),
+      // Kanban board routing for the GitHub->Kanban task link (#GH-kanban).
+      // 'per-repo' (default): one board per repo, slug = repo name — forks
+      // and renames of the same upstream repo still share it. 'shared': every
+      // repo's linked issues land on one board named below.
+      jsxs('div', { children: [
+        jsxs('div', { className: 'mb-1.5 flex items-center gap-1', children: [
+          jsx('span', { className: 'text-[10px] font-semibold uppercase tracking-wide text-(--ui-text-tertiary)', children: 'Kanban linking' }),
+          jsx(Tip, { label: 'When Implement (or any issue action) runs, a Kanban task is created/found for that issue and the session id is noted on it. Choose whether each repo gets its own board or they all share one.', children: jsx(Codicon, { name: 'error', size: 10, className: 'opacity-60' }) }),
+        ] }),
+        jsxs('div', { className: 'flex flex-col gap-1.5', children: [
+          jsxs('div', { className: 'flex items-center gap-2', children: [
+            jsx('span', { className: 'w-20 shrink-0 text-xs text-(--ui-text-tertiary)', children: 'Board' }),
+            jsxs(Select, {
+              value: kanbanSetting.mode,
+              onValueChange: mode => persistKanbanBoardSetting({ ...kanbanSetting, mode }),
+              children: [
+                jsx(SelectTrigger, { className: 'h-7 flex-1 text-xs', children: jsx(SelectValue, {}) }),
+                jsxs(SelectContent, { children: [
+                  jsx(SelectItem, { value: 'per-repo', children: 'One board per repo' }, 'per-repo'),
+                  jsx(SelectItem, { value: 'shared', children: 'One shared board' }, 'shared'),
+                ] }),
+              ],
+            }),
+          ] }),
+          kanbanSetting.mode === 'shared' ? jsxs('div', { className: 'flex items-center gap-2', children: [
+            jsx('span', { className: 'w-20 shrink-0 text-xs text-(--ui-text-tertiary)', children: 'Board name' }),
+            jsx(Input, {
+              className: 'h-7 flex-1 text-xs font-mono',
+              value: sharedBoardDraft,
+              onChange: e => setSharedBoardDraft(e.target.value),
+              onBlur: () => persistKanbanBoardSetting({ ...kanbanSetting, sharedBoard: sharedBoardDraft }),
+              placeholder: 'all-repos',
+            }),
+          ] }) : null,
         ] }),
       ] }),
     ] }) }),
@@ -4811,6 +4881,7 @@ export default {
     const storedRules = normalizeLabelRules(ctx.storage.get(LABEL_RULES_STORAGE_KEY, DEFAULT_LABEL_RULES))
     $labelRules.set(storedRules)
     $actionDefaults.set(normalizeActionDefaults(ctx.storage.get(ACTION_DEFAULTS_STORAGE_KEY, DEFAULT_ACTION_DEFAULTS)))
+    $kanbanBoardSetting.set(normalizeKanbanBoardSetting(ctx.storage.get(KANBAN_BOARD_SETTING_STORAGE_KEY, KANBAN_BOARD_MODE_DEFAULT)))
     const storedFilters = ctx.storage.get(LIST_FILTERS_STORAGE_KEY, null)
     if (storedFilters && typeof storedFilters === 'object') {
       if (typeof storedFilters.assignee === 'string') $filterAssignee.set(storedFilters.assignee)

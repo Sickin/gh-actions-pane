@@ -67,6 +67,7 @@ import {
   repoBoardSlug,
   issueTaskIdempotencyKey,
   linkIssuesToKanban,
+  normalizeKanbanBoardSetting,
   DEFAULT_LABEL_RULES,
   DEFAULT_ACTION_DEFAULTS,
   normalizeAction,
@@ -1236,6 +1237,14 @@ test('buildActionPlan refuses a missing action or repo before touching numbers',
   assert.match(buildActionPlan({ action: IMPLEMENT_ACTION, numbers: [1], repo: 'not a repo' }).error, /repository/i)
 })
 
+test('buildActionPlan carries a normalized kanbanBoardSetting onto the plan for runAction', () => {
+  const triage = { id: 'triage', title: 'Triage', command: 'triage', instruction: '', appliesTo: ['issue'], requiresCheckout: false }
+  const defaulted = buildActionPlan({ action: triage, numbers: [1], repo: 'acme/app' })
+  assert.deepEqual(defaulted.kanbanBoardSetting, { mode: 'per-repo', sharedBoard: 'all-repos' })
+  const shared = buildActionPlan({ action: triage, numbers: [1], repo: 'acme/app', kanbanBoardSetting: { mode: 'shared', sharedBoard: 'My Board' } })
+  assert.deepEqual(shared.kanbanBoardSetting, { mode: 'shared', sharedBoard: 'my-board' })
+})
+
 test('buildImplementPlan is a thin wrapper over buildActionPlan with IMPLEMENT_ACTION', () => {
   // Same contract as before the generic engine existed: pins backward compat.
   const plan = buildImplementPlan({ numbers: [34, 12], repo: 'acme/app', sessionRepo: 'acme/app', sessionCwd: '/tmp/app' })
@@ -1314,6 +1323,24 @@ test('repoBoardSlug derives a kebab-case board slug from the repo name only (nev
   assert.equal(repoBoardSlug(''), 'gh-actions-pane')
 })
 
+test('repoBoardSlug routes every repo to one shared board when boardSetting.mode is "shared"', () => {
+  const shared = { mode: 'shared', sharedBoard: 'my-work' }
+  assert.equal(repoBoardSlug('acme/app', shared), 'my-work')
+  assert.equal(repoBoardSlug('other/repo', shared), 'my-work')
+  // Undefined/omitted setting falls back to per-repo (today's default behavior).
+  assert.equal(repoBoardSlug('acme/app'), 'app')
+  assert.equal(repoBoardSlug('acme/app', { mode: 'per-repo' }), 'app')
+})
+
+test('normalizeKanbanBoardSetting tolerates a missing/malformed stored value', () => {
+  assert.deepEqual(normalizeKanbanBoardSetting(undefined), { mode: 'per-repo', sharedBoard: 'all-repos' })
+  assert.deepEqual(normalizeKanbanBoardSetting(null), { mode: 'per-repo', sharedBoard: 'all-repos' })
+  assert.deepEqual(normalizeKanbanBoardSetting([1, 2]), { mode: 'per-repo', sharedBoard: 'all-repos' })
+  assert.deepEqual(normalizeKanbanBoardSetting({ mode: 'bogus' }), { mode: 'per-repo', sharedBoard: 'all-repos' })
+  assert.deepEqual(normalizeKanbanBoardSetting({ mode: 'shared' }), { mode: 'shared', sharedBoard: 'all-repos' }, 'empty sharedBoard falls back to the default name')
+  assert.deepEqual(normalizeKanbanBoardSetting({ mode: 'shared', sharedBoard: 'My Work!!' }), { mode: 'shared', sharedBoard: 'my-work' })
+})
+
 test('issueTaskIdempotencyKey is stable and case-insensitive on the repo', () => {
   assert.equal(issueTaskIdempotencyKey('Acme/App', 12), 'gh:acme/app#12')
   assert.equal(issueTaskIdempotencyKey('acme/app', 12), issueTaskIdempotencyKey('ACME/APP', 12))
@@ -1339,6 +1366,26 @@ test('linkIssuesToKanban creates one task per number and comments the session id
   assert.deepEqual(out.map(o => o.taskId), ['t_3', 't_7'])
   assert.ok(calls.some(c => c.includes('kanban boards create') && c.includes('app')))
   assert.ok(calls.some(c => c.includes('comment') && c.includes('t_3') && c.includes('rt1')))
+})
+
+test('linkIssuesToKanban honors boardSetting: shared mode routes every repo to one named board', async () => {
+  const boardsCreated = []
+  const api = {
+    request: async (method, params) => {
+      const cmd = params.command
+      if (cmd.includes('boards create')) boardsCreated.push(cmd)
+      if (cmd.includes(' create ') && cmd.includes('--json')) {
+        const m = cmd.match(/#(\d+)/)
+        return { code: 0, stdout: JSON.stringify({ id: `t_${m[1]}` }) }
+      }
+      return { code: 0, stdout: '' }
+    },
+  }
+  const boardSetting = { mode: 'shared', sharedBoard: 'my-work' }
+  await linkIssuesToKanban(api, { repo: 'acme/app', numbers: [1], boardSetting })
+  await linkIssuesToKanban(api, { repo: 'other/repo', numbers: [2], boardSetting })
+  assert.ok(boardsCreated.every(c => c.includes('my-work')), 'both repos must target the same shared board')
+  assert.equal(boardsCreated.length, 2, 'one boards-create call per linkIssuesToKanban invocation (idempotent on the CLI side)')
 })
 
 test('linkIssuesToKanban records a per-issue error without throwing, and refuses a bad repo', async () => {
