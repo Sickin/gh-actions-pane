@@ -74,7 +74,7 @@ test('Issue #30: list filter tokens keep row and token actions separate', () => 
 
 test('List filters fetch and expose the same author/label scopes', () => {
   const lists = source.slice(source.indexOf('function PrList'), source.indexOf('function DetailToolbar'))
-  assert.ok(lists.includes('reviewDecision,statusCheckRollup,labels --jq'))
+  assert.ok(lists.includes('reviewDecision,statusCheckRollup,labels,milestone --jq'))
   assert.equal((lists.match(/setListFilter\(event, 'author'/g) || []).length, 2)
   assert.equal((lists.match(/setListFilter\(event, 'label'/g) || []).length, 2)
 })
@@ -422,9 +422,9 @@ test('Merged transcript PRs unlink: session falls back until the next PR', () =>
   assert.ok(hook.includes('resolveTranscriptPr(r?.messages'), 'histQ delegates the scan to the tested helper')
 })
 
-test('Session queries re-poll so opened/merged PRs surface without refocus', () => {
+test('Session queries re-poll so opened/merged PRs and issues surface without refocus', () => {
   const hook = source.slice(source.indexOf('function useSessionGit'), source.indexOf('function StateDot'))
-  assert.equal((hook.match(/refetchInterval: MEDIUM_POLL_MS/g) || []).length, 3)
+  assert.equal((hook.match(/refetchInterval: MEDIUM_POLL_MS/g) || []).length, 4)
 })
 
 test('Actions settings: register() hydrates storage before anything reads it', () => {

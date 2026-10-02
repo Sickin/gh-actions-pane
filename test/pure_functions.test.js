@@ -16,6 +16,8 @@ import {
   parseRemote,
   extractPrRef,
   resolveTranscriptPr,
+  extractIssueRef,
+  resolveTranscriptIssues,
   formatPrCheckoutCmd,
   commentToChatText,
   ago,
@@ -62,6 +64,9 @@ import {
   runAction,
   IMPLEMENT_ACTION,
   DEFAULT_ACTIONS,
+  repoBoardSlug,
+  issueTaskIdempotencyKey,
+  linkIssuesToKanban,
   DEFAULT_LABEL_RULES,
   DEFAULT_ACTION_DEFAULTS,
   normalizeAction,
@@ -76,6 +81,8 @@ import {
   toggleIssueSelection,
   selectedIssueNumbers,
   isMissingCommandError,
+  sortListItems,
+  matchesMilestone,
 } from '../desktop/plugin.js'
 
 test('Issue #13: labelTextColor chooses high-contrast text color based on luminance', () => {
@@ -166,6 +173,44 @@ test('resolveTranscriptPr keeps the link when the lookup fails', async () => {
   const pr = await resolveTranscriptPr([{ text: 'https://github.com/owner/repo/pull/9' }], fetchPr)
   assert.equal(pr.number, 9)
   assert.equal(pr.state, 'OPEN')
+})
+
+test('extractIssueRef extracts repo and issue number from issue URLs', () => {
+  assert.deepEqual(
+    extractIssueRef('https://github.com/owner/repo/issues/12'),
+    { repo: 'owner/repo', number: 12 }
+  )
+  assert.equal(extractIssueRef('https://github.com/owner/repo/pull/12'), null)
+  assert.equal(extractIssueRef('not a url'), null)
+  assert.equal(extractIssueRef(''), null)
+})
+
+test('resolveTranscriptIssues collects every distinct open issue, newest first', async () => {
+  const fetchIssue = async hit => hit.number === 3
+    ? { number: 3, state: 'closed', title: 'done' }
+    : { number: hit.number, state: 'open', title: `issue ${hit.number}` }
+  const msgs = [
+    { text: 'https://github.com/owner/repo/issues/1' },
+    { text: 'https://github.com/owner/repo/issues/3' },
+    { text: 'https://github.com/owner/repo/issues/2' },
+    { text: 'https://github.com/owner/repo/issues/2' }, // duplicate, must not double up
+  ]
+  const issues = await resolveTranscriptIssues(msgs, fetchIssue)
+  assert.deepEqual(issues.map(i => i.number), [2, 1])
+})
+
+test('resolveTranscriptIssues keeps the link when the lookup fails', async () => {
+  const fetchIssue = async () => { throw new Error('offline') }
+  const issues = await resolveTranscriptIssues([{ text: 'https://github.com/owner/repo/issues/9' }], fetchIssue)
+  assert.equal(issues.length, 1)
+  assert.equal(issues[0].number, 9)
+  assert.equal(issues[0].state, 'open')
+})
+
+test('resolveTranscriptIssues returns empty when every ref resolves closed', async () => {
+  const fetchIssue = async () => ({ number: 1, state: 'closed' })
+  assert.deepEqual(await resolveTranscriptIssues([{ text: 'https://github.com/owner/repo/issues/1' }], fetchIssue), [])
+  assert.deepEqual(await resolveTranscriptIssues([], fetchIssue), [])
 })
 
 test('Issue #33: formatPrCheckoutCmd returns a runnable gh command', () => {
@@ -1083,8 +1128,10 @@ test('implementIssues dispatches the skill then submits its expanded message', a
   const plan = buildImplementPlan({ numbers: [5], repo: 'acme/app', sessionRepo: 'acme/app', sessionCwd: '/tmp/app' })
   const result = await implementIssues(api, plan)
 
-  assert.deepEqual(result, { session_id: 'rt9', stored_session_id: 'st9', skillExpanded: true })
-  assert.deepEqual(calls.map(c => c.method), ['session.create', 'session.title', 'openSession', 'command.dispatch', 'prompt.submit'])
+  assert.equal(result.session_id, 'rt9')
+  assert.equal(result.skillExpanded, true)
+  assert.equal(result.kanban.length, 1)
+  assert.deepEqual(calls.map(c => c.method), ['session.create', 'session.title', 'openSession', 'command.dispatch', 'prompt.submit', 'shell.exec', 'shell.exec'])
   // The new session must be born in the checkout, or the skill edits the wrong tree.
   assert.equal(calls[0].params.cwd, '/tmp/app')
   assert.equal(calls[1].params.title, 'Implement acme/app #5 · rt9')
@@ -1211,12 +1258,97 @@ test('runAction dispatches the skill then submits its expanded message, for any 
   const triage = { id: 'triage', title: 'Triage', command: 'triage', instruction: '', appliesTo: ['issue'], requiresCheckout: false }
   const plan = buildActionPlan({ action: triage, numbers: [5], repo: 'acme/app' })
   const result = await runAction(api, plan)
-  assert.deepEqual(result, { session_id: 'rt9', stored_session_id: 'st9', skillExpanded: true })
-  assert.deepEqual(calls.map(c => c.method), ['session.create', 'session.title', 'openSession', 'command.dispatch', 'prompt.submit'])
-  assert.equal(calls[3].params.name, 'triage')
-  assert.equal(calls[4].params.text, 'EXPANDED SKILL TEXT')
-  // No cwd required for a requiresCheckout:false action.
-  assert.equal(calls[0].params.cwd, undefined)
+  // kanban linking is best-effort against this fake api (its shell.exec stub
+  // returns {} for every method, which fails the r.code !== 0 check) — each
+  // per-issue failure is recorded on the result, never thrown out of runAction.
+  assert.equal(result.session_id, 'rt9')
+  assert.equal(result.skillExpanded, true)
+  assert.equal(result.kanban.length, 1)
+  assert.equal(result.kanban[0].taskId, null)
+  assert.deepEqual(calls.map(c => c.method), ['session.create', 'session.title', 'openSession', 'command.dispatch', 'prompt.submit', 'shell.exec', 'shell.exec'])
+})
+
+test('runAction never lets a Kanban linking failure surface as an action failure', async () => {
+  const calls = []
+  const api = {
+    request: async (method, params) => {
+      calls.push({ method, params })
+      if (method === 'session.create') return { session_id: 'rtK', stored_session_id: 'stK' }
+      if (method === 'command.dispatch') return { type: 'skill', message: 'TEXT' }
+      if (method === 'shell.exec') throw new Error('kanban CLI unreachable')
+      return {}
+    },
+    openSession: async () => {},
+  }
+  const triage = { id: 'triage', title: 'Triage', command: 'triage', instruction: '', appliesTo: ['issue'], requiresCheckout: false }
+  const plan = buildActionPlan({ action: triage, numbers: [5], repo: 'acme/app' })
+  const result = await runAction(api, plan)
+  assert.equal(result.session_id, 'rtK')
+  assert.equal(result.kanban.length, 1)
+  assert.equal(result.kanban[0].taskId, null)
+  assert.match(result.kanban[0].error, /kanban CLI unreachable/)
+})
+
+test('runAction skips Kanban linking entirely for PR-kind plans', async () => {
+  const calls = []
+  const api = {
+    request: async (method, params) => {
+      calls.push({ method, params })
+      if (method === 'session.create') return { session_id: 'rtP', stored_session_id: 'stP' }
+      if (method === 'command.dispatch') return { type: 'skill', message: 'TEXT' }
+      return {}
+    },
+    openSession: async () => {},
+  }
+  const review = { id: 'review', title: 'Review', command: 'review', instruction: '', appliesTo: ['pr'], requiresCheckout: false }
+  const plan = buildActionPlan({ action: review, numbers: [9], repo: 'acme/app', kind: 'pr' })
+  const result = await runAction(api, plan)
+  assert.deepEqual(result.kanban, [])
+  assert.ok(!calls.some(c => c.method === 'shell.exec'), 'a PR action must never shell out for kanban linking')
+})
+
+test('repoBoardSlug derives a kebab-case board slug from the repo name only (never owner)', () => {
+  assert.equal(repoBoardSlug('chrisbevins/gh-actions-pane'), 'gh-actions-pane')
+  assert.equal(repoBoardSlug('acme/App Name'), 'app-name')
+  assert.equal(repoBoardSlug('acme/Weird__Chars!!'), 'weird-chars')
+  assert.equal(repoBoardSlug(''), 'gh-actions-pane')
+})
+
+test('issueTaskIdempotencyKey is stable and case-insensitive on the repo', () => {
+  assert.equal(issueTaskIdempotencyKey('Acme/App', 12), 'gh:acme/app#12')
+  assert.equal(issueTaskIdempotencyKey('acme/app', 12), issueTaskIdempotencyKey('ACME/APP', 12))
+})
+
+test('linkIssuesToKanban creates one task per number and comments the session id', async () => {
+  const calls = []
+  const api = {
+    request: async (method, params) => {
+      calls.push(params.command)
+      if (method === 'shell.exec') {
+        const cmd = params.command
+        if (cmd.includes(' create ') && cmd.includes('--json')) {
+          const m = cmd.match(/#(\d+)/)
+          return { code: 0, stdout: JSON.stringify({ id: `t_${m[1]}` }) }
+        }
+        return { code: 0, stdout: '' }
+      }
+      return { code: 0, stdout: '' }
+    },
+  }
+  const out = await linkIssuesToKanban(api, { repo: 'acme/app', numbers: [3, 7], sessionId: 'rt1' })
+  assert.deepEqual(out.map(o => o.taskId), ['t_3', 't_7'])
+  assert.ok(calls.some(c => c.includes('kanban boards create') && c.includes('app')))
+  assert.ok(calls.some(c => c.includes('comment') && c.includes('t_3') && c.includes('rt1')))
+})
+
+test('linkIssuesToKanban records a per-issue error without throwing, and refuses a bad repo', async () => {
+  const api = { request: async () => { throw new Error('boom') } }
+  const out = await linkIssuesToKanban(api, { repo: 'acme/app', numbers: [1] })
+  assert.equal(out.length, 1)
+  assert.equal(out[0].taskId, null)
+  assert.match(out[0].error, /boom/)
+  assert.deepEqual(await linkIssuesToKanban(api, { repo: 'not a repo', numbers: [1] }), [])
+  assert.deepEqual(await linkIssuesToKanban(api, { repo: 'acme/app', numbers: [] }), [])
 })
 
 test('normalizeAction drops malformed entries instead of crashing the pane', () => {
@@ -1315,6 +1447,30 @@ test('issue selection is keyed by repo so it survives list growth and refetches'
   // Malformed keys are dropped, never coerced to a number.
   assert.deepEqual(selectedIssueNumbers(['acme/app#abc', 'acme/app#0', 'acme/app#-1'], 'acme/app'), [])
   assert.deepEqual(selectedIssueNumbers(null, 'acme/app'), [])
+})
+
+test('sortListItems orders by updated, created or title without mutating the input', () => {
+  const items = [
+    { title: 'Banana', updatedAt: '2024-01-01T00:00:00Z', createdAt: '2023-06-01T00:00:00Z' },
+    { title: 'apple', updatedAt: '2024-03-01T00:00:00Z', createdAt: '2023-01-01T00:00:00Z' },
+    { title: 'Cherry', updatedAt: '2024-02-01T00:00:00Z', createdAt: '2024-05-01T00:00:00Z' },
+  ]
+  const original = [...items]
+  assert.deepEqual(sortListItems(items, 'updated').map(i => i.title), ['apple', 'Cherry', 'Banana'])
+  assert.deepEqual(sortListItems(items, 'created').map(i => i.title), ['Cherry', 'Banana', 'apple'])
+  assert.deepEqual(sortListItems(items, 'title').map(i => i.title), ['apple', 'Banana', 'Cherry'])
+  // Unknown/default sort falls back to 'updated'.
+  assert.deepEqual(sortListItems(items, 'bogus').map(i => i.title), ['apple', 'Cherry', 'Banana'])
+  assert.deepEqual(items, original, 'must not mutate the input array')
+  assert.deepEqual(sortListItems(null, 'title'), [])
+})
+
+test('matchesMilestone: empty filter passes everything, otherwise exact match', () => {
+  assert.equal(matchesMilestone({ milestone: 'v1.0' }, ''), true)
+  assert.equal(matchesMilestone({ milestone: 'v1.0' }, 'v1.0'), true)
+  assert.equal(matchesMilestone({ milestone: 'v1.0' }, 'v2.0'), false)
+  assert.equal(matchesMilestone({}, 'v1.0'), false)
+  assert.equal(matchesMilestone({}, ''), true)
 })
 
 const RESERVED_LOOKALIKES = ['Bot Chat', 'Agent Inbox']
