@@ -3365,9 +3365,14 @@ function PrList({ repo, onOpen, query, active = true }) {
   const q = useQuery({
     queryKey: [ID, 'prs', repo, state, limit, assignee, labels, milestone],
     enabled: !!repo && active,
-    // Growth changes the key: hold previous rows through the fetch (and the
-    // error that may follow) instead of flashing the skeleton.
-    placeholderData: (prev) => prev,
+    // Growth (pagination, filter/sort change) changes the key: hold previous
+    // rows through the fetch (and the error that may follow) instead of
+    // flashing the skeleton. `repo` lives at the SAME key index though, so a
+    // blanket `prev => prev` also held the OLD repo's rows on screen while
+    // the new repo's fetch was in flight — reading as "clicking a repo did
+    // nothing" until a second click's fetch happened to land. Only carry
+    // placeholder data forward when the previous query was for this same repo.
+    placeholderData: (prev, prevQuery) => (prevQuery?.queryKey?.[2] === repo ? prev : undefined),
     // Issue #10: expanded list metadata can overflow the stdout cap, so the
     // list routes through shBig.
     queryFn: () => shJsonBig(`${GH} pr list --repo ${sq(repo)} --state ${sq(state)} --limit ${limit}${listFilterFlags({ assignee, labels })} --json number,title,state,author,updatedAt,url,baseRefName,headRefName,isDraft,additions,deletions,changedFiles,reviewDecision,statusCheckRollup,labels,milestone --jq ${sq(PR_LIST_JQ)}`),
@@ -3458,8 +3463,10 @@ function IssueList({ repo, onOpen, query, active = true }) {
   const q = useQuery({
     queryKey: [ID, 'issues', repo, state, limit, assignee, labels, milestone],
     enabled: !!repo && active,
-    // Same key-growth hold as the PR list above.
-    placeholderData: (prev) => prev,
+    // Same key-growth hold as the PR list above — and the same repo-change
+    // fix: only carry placeholder rows forward when the previous query was
+    // for this same repo (queryKey[2]).
+    placeholderData: (prev, prevQuery) => (prevQuery?.queryKey?.[2] === repo ? prev : undefined),
     // Issue #10: same stdout-cap routing as the PR list (busy repos overflow).
     queryFn: () => shJsonBig(`${GH} issue list --repo ${sq(repo)} --state ${sq(state)} --limit ${limit}${listFilterFlags({ assignee, labels })}${milestone ? ` --milestone ${sq(milestone)}` : ''} --json number,title,state,author,updatedAt,url,labels,milestone --jq ${sq(ISSUE_LIST_JQ)}`),
     staleTime: 15_000,
