@@ -66,6 +66,9 @@ import {
   DEFAULT_ACTIONS,
   repoBoardSlug,
   repoFollowStep,
+  parseBackendWindows,
+  describeKanbanLink,
+  parseSessionGit,
   issueTaskIdempotencyKey,
   linkIssuesToKanban,
   normalizeKanbanBoardSetting,
@@ -1544,4 +1547,49 @@ test('repoFollowStep waits for git to resolve and re-arms on a repo-less selecti
   assert.deepEqual(none, { lastKey: null, applyRepo: null })
   const back = repoFollowStep({ sessionId: 'a', cwd: '/p', sessionRepo: 'acme/app', resolved: true, lastKey: none.lastKey })
   assert.equal(back.applyRepo, 'acme/app')
+})
+
+test('parseBackendWindows tells cmd.exe from sh by how %OS% expands', () => {
+  assert.equal(parseBackendWindows('Windows_NT\r\n'), true)
+  assert.equal(parseBackendWindows('%OS%\n'), false) // sh leaves it literal
+  assert.equal(parseBackendWindows(''), false)
+  assert.equal(parseBackendWindows(undefined), false)
+})
+
+test('describeKanbanLink reports success, partial failure and total failure; silent when nothing ran', () => {
+  assert.equal(describeKanbanLink([]), null)
+  assert.equal(describeKanbanLink(undefined), null)
+  const ok = describeKanbanLink([{ number: 3, taskId: 't_3', board: 'app' }])
+  assert.equal(ok.kind, 'info')
+  assert.match(ok.message, /t_3.*app/)
+  const none = describeKanbanLink([{ number: 3, taskId: null, board: 'app', error: 'hermes: not found\nmore' }])
+  assert.equal(none.kind, 'warning')
+  assert.match(none.message, /Kanban link failed: hermes: not found$/)
+  const some = describeKanbanLink([
+    { number: 3, taskId: 't_3', board: 'app' },
+    { number: 4, taskId: null, board: 'app', error: 'boom' },
+  ])
+  assert.equal(some.kind, 'warning')
+  assert.match(some.message, /1 of 2.*1 failed: boom/)
+  // Task created but the session comment failed: not counted as linked.
+  assert.equal(describeKanbanLink([{ number: 3, taskId: 't_3', board: 'app', error: 'x' }]).kind, 'warning')
+})
+
+test('linkIssuesToKanban keeps the task id and board when only the session comment fails', async () => {
+  const api = { request: async (_m, { command }) => command.includes(' comment ')
+    ? { code: 1, stderr: 'comment failed', stdout: '' }
+    : { code: 0, stdout: command.includes(' create ') && !command.includes('boards create') ? '{"id":"t_9"}' : '' } }
+  const out = await linkIssuesToKanban(api, { repo: 'acme/app', numbers: [5], sessionId: 's1' })
+  assert.equal(out[0].taskId, 't_9')
+  assert.equal(out[0].board, 'app')
+  assert.match(out[0].error, /comment failed/)
+})
+
+test('parseSessionGit separates unreadable folders from non-repos', () => {
+  assert.deepEqual(parseSessionGit('ok\nmain\nhttps://github.com/acme/app.git\n'),
+    { unreadable: false, branch: 'main', repo: 'acme/app' })
+  assert.deepEqual(parseSessionGit('ok\n\n\n'), { unreadable: false, branch: null, repo: null })
+  assert.deepEqual(parseSessionGit('missing\n'), { unreadable: true, branch: null, repo: null })
+  // A failed probe (network) is not "unreadable" — don't show a false warning.
+  assert.deepEqual(parseSessionGit(''), { unreadable: false, branch: null, repo: null })
 })

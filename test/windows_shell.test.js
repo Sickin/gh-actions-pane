@@ -8,26 +8,28 @@ import { readFileSync } from 'node:fs'
 // only exists on the POSIX side.
 const source = readFileSync(new URL('../desktop/plugin.js', import.meta.url), 'utf8')
 
-test('shell: every gh/hermes invocation resolves the binary per platform', () => {
-  // A hardcoded `PATH=/opt/homebrew/...:$PATH gh` prefix is a VARIABLE NAMES
-  // assignment under cmd.exe: gh never runs and the call "succeeds" with empty
-  // stdout, which is worse than a visible failure.
-  assert.ok(!source.includes("const GH = 'PATH="), 'GH must not hardcode a POSIX PATH prefix')
-  assert.ok(!source.includes("const HERMES = 'PATH="), 'HERMES must not hardcode a POSIX PATH prefix')
-  assert.ok(source.includes('const POSIX_SHELL ='), 'platform detection is missing')
-  assert.ok(source.includes('${POSIX_SHELL ? POSIX_PATH : \'\'}gh'), 'GH must be platform-gated')
-  assert.ok(source.includes('${POSIX_SHELL ? POSIX_PATH : \'\'}hermes'), 'HERMES must be platform-gated')
+test('shell: the platform comes from the backend, and the PATH hint is added only on POSIX', () => {
+  // A `PATH=/opt/homebrew/...:$PATH gh` prefix is a VARIABLE NAMES assignment
+  // under cmd.exe: gh never runs and the call "succeeds" with empty stdout, which
+  // is worse than a visible failure. shell.exec runs on the BACKEND (the remote
+  // host over SSH), so the shell is probed there, never guessed from the client.
+  assert.ok(source.includes("const GH = 'gh'"), 'GH must be a bare name')
+  assert.ok(source.includes("const HERMES = 'hermes'"), 'HERMES must be a bare name')
+  assert.ok(!source.includes('const POSIX_SHELL ='), 'client-side platform guess must not decide the shell')
+  assert.ok(source.includes("command: 'echo %OS%'"), 'backend shell probe is missing')
+  assert.ok(source.includes('return POSIX_PATH_HINT + cmd'), 'POSIX commands must get the PATH hint in shellCommand')
 })
 
 test('shell: every shell.exec goes through the shellCommand wrapper', () => {
   // A raw `host.request('shell.exec', { command: cmd })` call site bypasses the
   // Windows bash hop and reintroduces the cmd.exe bug for that one query.
   const calls = source.match(/host\.request\('shell\.exec', \{ command: [^}]*\}/g) || []
-  assert.ok(calls.length >= 4, 'expected the wrapper callers, the where-git probe and the bash probe')
+  assert.ok(calls.length >= 4, 'expected the wrapper callers, the shell probes and the bash probe')
   for (const call of calls) {
     const ok =
       call.includes('shellCommand(') ||
       call.includes("'where git'") ||
+      call.includes("'echo %OS%'") ||
       call.includes('if exist')
     assert.ok(ok, `unwrapped shell.exec call site: ${call}`)
   }

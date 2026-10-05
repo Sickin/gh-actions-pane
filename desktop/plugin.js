@@ -65,15 +65,38 @@ const GITHUB_ROUTE = '/github'
 const ROUTES_AREA_LIT = 'routes'
 const SIDEBAR_NAV_LIT = 'sidebar.nav'
 const TRUNK = new Set(['main', 'master', 'dev', 'develop', 'trunk'])
-// POSIX PATH prefix so `gh` resolves under macOS/Linux shells that don't
-// inherit the user's login PATH (Homebrew, /usr/local). Windows runs
-// shell.exec through cmd.exe, where a leading `PATH=... cmd` assignment is
-// parsed as a VARIABLE NAMES command and the binary never runs — it exits 0
-// with empty stdout. Detect the shell and only prefix where it is valid.
-const POSIX_SHELL = typeof navigator === 'undefined' || !/win/i.test(navigator.platform || navigator.userAgent || '')
-const POSIX_PATH = 'PATH=/opt/homebrew/bin:/usr/local/bin:$PATH '
-const GH = `${POSIX_SHELL ? POSIX_PATH : ''}gh`
-const HERMES = `${POSIX_SHELL ? POSIX_PATH : ''}hermes`
+// `gh` / `hermes` are plain names; shellCommand adds the PATH hint on POSIX
+// backends (macOS/Linux shells that don't inherit the login PATH: Homebrew,
+// /usr/local). A Windows backend runs shell.exec through cmd.exe, where a
+// leading `PATH=... cmd` is parsed as a VARIABLE NAMES command and the binary
+// never runs (exit 0, empty stdout), so the hint must not be added there.
+const GH = 'gh'
+const HERMES = 'hermes'
+const POSIX_PATH_HINT = 'export PATH=/opt/homebrew/bin:/usr/local/bin:$PATH; '
+
+// shell.exec runs on the BACKEND, which over SSH is not the machine the app is
+// on. Ask it which shell it has instead of guessing from the client: `%OS%`
+// expands to Windows_NT under cmd.exe and stays literal under sh. Cached per
+// connection; a failed probe (gateway not open yet) falls back to the client
+// guess for that call only and is retried next time.
+export function parseBackendWindows(stdout) {
+  return /Windows_NT/i.test(String(stdout || ''))
+}
+const clientLooksWindows = () => typeof navigator !== 'undefined'
+  && /win/i.test(navigator.platform || navigator.userAgent || '')
+const connectionKey = () => String(host.state?.connectionId?.get?.() ?? '')
+let shellProbe = { key: null, promise: null, settled: false, failed: false }
+function backendIsWindows() {
+  const key = connectionKey()
+  if (shellProbe.promise && shellProbe.key === key && !shellProbe.failed) return shellProbe.promise
+  const probe = { key, settled: false, failed: false, promise: null }
+  probe.promise = host.request('shell.exec', { command: 'echo %OS%' }).then(
+    r => { probe.settled = true; return parseBackendWindows(r?.stdout) },
+    () => { probe.failed = true; return clientLooksWindows() },
+  )
+  shellProbe = probe
+  return probe.promise
+}
 const PLUGIN_NAME = 'gh-actions-pane'
 // $HERMES_HOME is expanded by the backend shell (profile-aware); double quotes
 // keep it a single word while still letting the env var through.
@@ -636,21 +659,41 @@ export async function linkIssuesToKanban(api, { repo, numbers, sessionId, boardS
     await shVia(api, `${HERMES} kanban boards create ${sq(board)} --name ${sq(repoName)}`)
   } catch { /* "already exists" also exits non-zero on some builds — treated the same as success */ }
   for (const number of list) {
+    let taskId = null
     try {
       const key = issueTaskIdempotencyKey(repoName, number)
       const url = `https://github.com/${repoName}/issues/${number}`
       const title = `${repoName}#${number}`
       const task = await shJsonVia(api,
         `${HERMES} kanban --board ${sq(board)} create ${sq(title)} --body ${sq(url)} --idempotency-key ${sq(key)} --json`)
-      if (task?.id && sessionId) {
-        await shVia(api, `${HERMES} kanban --board ${sq(board)} comment ${sq(task.id)} ${sq(`Linked Hermes session: ${sessionId}`)}`)
+      taskId = task?.id || null
+      if (taskId && sessionId) {
+        await shVia(api, `${HERMES} kanban --board ${sq(board)} comment ${sq(taskId)} ${sq(`Linked Hermes session: ${sessionId}`)}`)
       }
-      results.push({ number, taskId: task?.id || null })
+      results.push({ number, taskId, board })
     } catch (error) {
-      results.push({ number, taskId: null, error: String(error?.message || error) })
+      results.push({ number, taskId, board, error: String(error?.message || error) })
     }
   }
   return results
+}
+
+// One user-facing line for the Kanban link step, or null when nothing was
+// attempted (PR actions, no issues). Linking is best-effort and never fails the
+// action, so this is the only place the user learns whether it worked.
+export function describeKanbanLink(results) {
+  const list = Array.isArray(results) ? results : []
+  if (!list.length) return null
+  const failed = list.filter(r => r.error)
+  const linked = list.filter(r => r.taskId && !r.error)
+  const board = list.find(r => r.board)?.board
+  const why = String(failed[0]?.error || '').split('\n')[0].slice(0, 140)
+  if (failed.length === list.length) return { kind: 'warning', message: `Kanban link failed: ${why}` }
+  if (failed.length) {
+    return { kind: 'warning', message: `Linked ${linked.length} of ${list.length} to Kanban board ${board}; ${failed.length} failed: ${why}` }
+  }
+  const ids = linked.map(r => r.taskId).join(', ')
+  return { kind: 'info', message: `Kanban: ${linked.length === 1 ? 'task' : 'tasks'} ${ids} on board ${board}` }
 }
 
 // Run a plan: create a session in the checkout (if any), expand the skill
@@ -703,7 +746,8 @@ export async function runAction(api, plan) {
   // action-dispatch failure; the session already started successfully.
   let kanban = []
   if (plan.kind !== 'pr' && Array.isArray(plan.numbers) && plan.numbers.length) {
-    kanban = await linkIssuesToKanban(api, { repo: plan.repo, numbers: plan.numbers, sessionId: runtime, boardSetting: plan.kanbanBoardSetting }).catch(() => [])
+    kanban = await linkIssuesToKanban(api, { repo: plan.repo, numbers: plan.numbers, sessionId: runtime, boardSetting: plan.kanbanBoardSetting })
+      .catch(error => [{ number: null, taskId: null, error: String(error?.message || error) }])
   }
   return { session_id: runtime, stored_session_id: stored, skillExpanded, kanban }
 }
@@ -1008,12 +1052,16 @@ function sendCommentToChat(c) {
 // delete, which is why the cleanup uses `unlink`.
 let bashPath = null
 let bashReady = null
+let bashKey = null
 
-/** Resolve Git for Windows' bash once. No-op on POSIX, where commands run as-is. */
+/** Resolve Git for Windows' bash once per connection. No-op on POSIX backends, where commands run as-is. */
 function resolveBash() {
-  if (bashReady) return bashReady
-  bashReady = (async () => {
-    if (POSIX_SHELL) return
+  const key = connectionKey()
+  if (bashReady && bashKey === key) return bashReady
+  bashKey = key
+  bashPath = null
+  const attempt = (async () => {
+    if (!(await backendIsWindows())) return
     try {
       const r = await host.request('shell.exec', { command: 'where git' })
       const git = (r.stdout || '').split(/\r?\n/).map(s => s.trim()).filter(Boolean)[0]
@@ -1031,12 +1079,15 @@ function resolveBash() {
       }
     } catch { /* shellCommand's bash-not-found stub is the recovery path */ }
   })()
-  return bashReady
+  bashReady = attempt
+  // The probe did not reach the backend: don't cache the guess.
+  attempt.then(() => { if (!shellProbe.settled && bashReady === attempt) bashReady = null })
+  return attempt
 }
 
 async function shellCommand(cmd) {
   await resolveBash()
-  if (POSIX_SHELL) return cmd
+  if (!(await backendIsWindows())) return POSIX_PATH_HINT + cmd
   if (!bashPath) return 'echo Git for Windows bash.exe was not found. Install Git for Windows and reopen this pane.&exit /b 9009'
   // Only base64 crosses cmd.exe (see the block comment above). Inside bash the
   // command is decoded into a $$-unique /tmp script, so concurrent shell.exec
@@ -1214,8 +1265,9 @@ async function shBig(cmd) {
   try {
     // `od -An -v -tx1` is POSIX (xxd is not guaranteed present); -v keeps repeat
     // lines that od would otherwise collapse to `*`, which would silently drop data.
-    await sh(`${cmd} > ${sq(raw)} && od -An -v -tx1 < ${sq(raw)} | tr -d ' \\n\\r' > ${sq(hex)}`)
-    const byteLength = Number(await sh(`wc -c < ${sq(hex)}`))
+    // Write and measure in ONE shell.exec: each call is a full round trip, which
+    // over SSH is the dominant cost of a list load.
+    const byteLength = Number(await sh(`${cmd} > ${sq(raw)} && od -An -v -tx1 < ${sq(raw)} | tr -d ' \\n\\r' > ${sq(hex)} && wc -c < ${sq(hex)}`))
     if (!Number.isFinite(byteLength)) throw new Error('shell payload size unreadable')
     const out = await readChunksConcurrently(
       byteLength,
@@ -1806,15 +1858,30 @@ async function getCatalogPin() {
   return pin
 }
 
+// Output of the one-shot probe in useSessionGit: line 1 `ok|missing` (is the
+// folder readable on the machine that runs shell.exec?), then branch, then
+// origin URL. `unreadable` matters over SSH: the app's project folder may only
+// exist on the client, and every git lookup then fails silently.
+export function parseSessionGit(out) {
+  const [status, branch, remote] = String(out || '').split(/\r?\n/).map(l => l.trim())
+  return {
+    unreadable: status === 'missing',
+    branch: (status === 'ok' && branch) || null,
+    repo: status === 'ok' ? parseRemote(remote || '') : null,
+  }
+}
+
 function useSessionGit(cwd) {
   return useQuery({
     queryKey: [ID, 'session-git', cwd],
     enabled: !!cwd,
     refetchInterval: MEDIUM_POLL_MS,
     queryFn: async () => {
-      const branch = await sh(`git -C ${sq(cwd)} rev-parse --abbrev-ref HEAD`).catch(() => '')
-      const remote = await sh(`git -C ${sq(cwd)} config --get remote.origin.url`).catch(() => '')
-      return { branch: (branch || '').trim() || null, repo: parseRemote(remote) }
+      // One round trip (each is a full SSH hop): folder check, branch, remote.
+      const q = sq(cwd)
+      const out = await sh(`if [ -d ${q} ]; then echo ok; git -C ${q} rev-parse --abbrev-ref HEAD 2>/dev/null || echo; git -C ${q} config --get remote.origin.url 2>/dev/null || echo; else echo missing; fi`)
+        .catch(() => '')
+      return parseSessionGit(out)
     },
     staleTime: 10_000,
   })
@@ -3624,6 +3691,8 @@ function ActionButton({ repo, numbers, kind = 'issue', labels, onDone, variant =
       host.notify?.(result?.skillExpanded === false
         ? { kind: 'warning', message: `Opened ${what} without the /${action.command} skill — it is not installed on this backend` }
         : { kind: 'info', message: `${action.title}: ${what}` })
+      const kanbanNote = describeKanbanLink(result?.kanban)
+      if (kanbanNote) host.notify?.(kanbanNote)
       onDone?.()
     },
     onError: (error, action) => {
@@ -4256,8 +4325,15 @@ function IssueDetail({ repo, number, onBack, active = true, onOpenSettings }) {
 function SessionPrBanner() {
   const cwd = useValue(host.state.cwd)
   const activeId = useValue(host.state.activeSessionId)
-  const { pr, loading } = useSessionPr(cwd, activeId)
+  const { gitQ, pr, loading } = useSessionPr(cwd, activeId)
   const { issues, loading: issuesLoading } = useSessionIssues(activeId)
+  const folderNode = gitQ.data?.unreadable ? jsxs('div', {
+    className: 'shrink-0 w-full border-b border-(--ui-stroke-secondary) bg-(--ui-bg-quaternary) px-3 py-2 flex items-start gap-2 text-xs',
+    children: [
+      jsx(Codicon, { name: 'warning', size: 14, className: 'shrink-0 mt-0.5 text-(--ui-yellow)' }),
+      jsx('span', { className: 'min-w-0 break-words text-(--ui-text-tertiary)', children: `Can’t read ${cwd} on the machine running Hermes, so the session’s repo, branch and PR can’t be detected. Over SSH the project folder has to exist on the remote host.` }),
+    ],
+  }) : null
   const prNode = (!loading && pr) ? jsxs('button', {
     type: 'button',
     onClick: () => {
@@ -4291,8 +4367,8 @@ function SessionPrBanner() {
       jsx(Badge, { variant: 'secondary', className: 'text-[10px] h-4 shrink-0', children: 'open' }),
     ],
   }, `${issue.repo}#${issue.number}`)) : []
-  if (!prNode && !issueNodes.length) return null
-  return jsxs(Fragment, { children: [prNode, ...issueNodes] })
+  if (!folderNode && !prNode && !issueNodes.length) return null
+  return jsxs(Fragment, { children: [folderNode, prNode, ...issueNodes] })
 }
 
 function useGitHubShellState() {
