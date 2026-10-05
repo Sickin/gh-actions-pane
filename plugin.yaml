@@ -3,9 +3,9 @@ version: "0.6.0"
 description: GitHub PRs, Issues, and label-routed custom Actions as a right workspace pane in Hermes Desktop. Data via the connected gh CLI — no backend, no tokens.
 manifest_version: 1
 requires_hermes: ">=0.21.1"
-author: chrisbevins
+author: Sickin
 license: MIT
-homepage: https://github.com/chrisbevins/gh-actions-pane
+homepage: https://github.com/Sickin/gh-actions-pane
 capabilities: []
 kind: standalone
 requires_env: []

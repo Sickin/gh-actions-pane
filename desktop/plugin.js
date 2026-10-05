@@ -1616,8 +1616,9 @@ export function getGitHubShellStore() {
   if (!store) {
     store = {
       repo: atom(''),
-      // Last session repo auto-applied; lets a manual pick stand until it changes.
-      lastAutoRepo: null,
+      // Selection (session id + cwd) whose repo was last auto-applied; lets a
+      // manual pick stand until the user selects a different chat/project.
+      lastAutoKey: null,
       tab: atom('issues'),
       listQuery: atom(''),
       prState: atom('open'),
@@ -1646,6 +1647,21 @@ export function getGitHubShellStore() {
   if (!store.filterMilestone) store.filterMilestone = atom('')
   if (!store.sortBy) store.sortBy = atom('updated')
   return store
+}
+
+// Repo auto-follow rule. The pane adopts the selected session's repo once per
+// selection (session id + cwd), never once per repo value: chats in one project
+// share a cwd/repo, so keying on the repo would leave a manual pick in place
+// when you click another chat in the same project. A selection with no repo
+// re-arms, so returning to a previously applied chat applies it again.
+// Returns the next `lastKey` and the repo to apply (null = leave as is).
+export function repoFollowStep({ sessionId, cwd, sessionRepo, resolved, lastKey } = {}) {
+  const key = `${sessionId || ''}\u0000${cwd || ''}`
+  if (sessionRepo) {
+    if (key === lastKey) return { lastKey, applyRepo: null }
+    return { lastKey: key, applyRepo: sessionRepo }
+  }
+  return { lastKey: resolved ? null : lastKey, applyRepo: null }
 }
 
 const githubShellStore = getGitHubShellStore()
@@ -1957,7 +1973,7 @@ function SessionPrStatus() {
 // so local rev-list would miscount), and the update button runs the same CLI
 // users would. Null when gh-actions-pane is not an installed package (dev symlinks)
 // — those update through git itself.
-const PLUGIN_REPO = 'chrisbevins/gh-actions-pane'
+const PLUGIN_REPO = 'Sickin/gh-actions-pane'
 function PluginUpdateStatus() {
   const [updating, setUpdating] = useState(false)
   const [error, setError] = useState('')
@@ -4287,6 +4303,7 @@ function useGitHubShellState() {
   const selPr = useValue($selPr)
   const selIssue = useValue($selIssue)
   const cwd = useValue(host.state.cwd)
+  const activeId = useValue(host.state.activeSessionId)
   const gitQ = useSessionGit(cwd)
   const savedRepo = pluginCtx?.storage.get('repo')
   const repoOrder = useValue(githubShellStore.repoOrder)
@@ -4309,21 +4326,24 @@ function useGitHubShellState() {
   )
 
   useEffect(() => {
-    const sessionRepo = gitQ.data?.repo
-    if (sessionRepo) {
-      // Follow the session's repo; a manual pick stands until it changes again.
-      if (sessionRepo !== githubShellStore.lastAutoRepo) {
-        githubShellStore.lastAutoRepo = sessionRepo
-        if (sessionRepo !== repo) $repo.set(sessionRepo)
-      }
+    const follow = repoFollowStep({
+      sessionId: activeId,
+      cwd,
+      sessionRepo: gitQ.data?.repo,
+      resolved: !!gitQ.data,
+      lastKey: githubShellStore.lastAutoKey,
+    })
+    githubShellStore.lastAutoKey = follow.lastKey
+    if (follow.applyRepo) {
+      if (follow.applyRepo !== repo) $repo.set(follow.applyRepo)
     } else if (gitQ.data) {
-      githubShellStore.lastAutoRepo = null // cwd resolved with no repo: re-arm auto-follow
+      // Resolved with no repo: leave the pane where it is.
     } else if (!repo && (reposQ.data || savedRepo)) {
       // Prefer persisted repo even when it sits outside gh's first 30 (#56).
       if (savedRepo && repoOk(savedRepo)) $repo.set(savedRepo)
       else if (repoOptions[0]) $repo.set(repoOptions[0])
     }
-  }, [reposQ.data, gitQ.data, repo, savedRepo, repoOptions])
+  }, [reposQ.data, gitQ.data, activeId, cwd, repo, savedRepo, repoOptions])
   useEffect(() => { if (repo) pluginCtx?.storage.set('repo', repo) }, [repo])
   // Reset only on a real repo change. Both surfaces share these atoms, so
   // mounting the page or pane must not drop the open detail or search.

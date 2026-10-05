@@ -41,7 +41,7 @@ A single-file desktop plugin (`@hermes/plugin-sdk`) that shows your repository's
 ## Install
 
 ```bash
-hermes plugins install chrisbevins/gh-actions-pane --enable
+hermes plugins install Sickin/gh-actions-pane --enable
 ```
 
 Or manually: drop this folder into `~/.hermes/plugins/gh-actions-pane/` (unified package — the desktop half lives at `desktop/plugin.js`), or copy `desktop/plugin.js` to `~/.hermes/desktop-plugins/gh-actions-pane/plugin.js` (standalone disk door). The app hot-reloads on save.
@@ -61,6 +61,10 @@ The plugin **id** changed (`github-prs` → `githermes` → `gh-actions-pane`), 
 ## Status & contributing
 
 Early stage — expect bugs; reports and PRs are very welcome. See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Credits
+
+GH Actions Pane is a fork of [githermes](https://github.com/claudioorjunior/githermes) by [@claudioorjunior](https://github.com/claudioorjunior), which provided the original PR/Issue pane and the `gh`-over-`shell.exec` approach this plugin is built on. Thank you. The Actions engine, label routing, and Kanban linking were added in this fork.
 
 ## License
 

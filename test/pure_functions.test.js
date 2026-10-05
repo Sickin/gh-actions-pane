@@ -65,6 +65,7 @@ import {
   IMPLEMENT_ACTION,
   DEFAULT_ACTIONS,
   repoBoardSlug,
+  repoFollowStep,
   issueTaskIdempotencyKey,
   linkIssuesToKanban,
   normalizeKanbanBoardSetting,
@@ -1521,3 +1522,26 @@ test('matchesMilestone: empty filter passes everything, otherwise exact match', 
 })
 
 const RESERVED_LOOKALIKES = ['Bot Chat', 'Agent Inbox']
+
+test('repoFollowStep applies the session repo once per selection, not once per repo value', () => {
+  // Chat A resolves: the pane follows.
+  let st = repoFollowStep({ sessionId: 'a', cwd: '/p', sessionRepo: 'acme/app', resolved: true, lastKey: null })
+  assert.equal(st.applyRepo, 'acme/app')
+  // Re-render with the same selection (e.g. user picked another repo by hand): leave it alone.
+  const again = repoFollowStep({ sessionId: 'a', cwd: '/p', sessionRepo: 'acme/app', resolved: true, lastKey: st.lastKey })
+  assert.equal(again.applyRepo, null)
+  // A different chat in the SAME project/repo re-applies it (the "needs two chats" bug).
+  const other = repoFollowStep({ sessionId: 'b', cwd: '/p', sessionRepo: 'acme/app', resolved: true, lastKey: again.lastKey })
+  assert.equal(other.applyRepo, 'acme/app')
+})
+
+test('repoFollowStep waits for git to resolve and re-arms on a repo-less selection', () => {
+  // Not resolved yet (new cwd still loading): no change, key untouched.
+  const loading = repoFollowStep({ sessionId: 'b', cwd: '/q', sessionRepo: undefined, resolved: false, lastKey: 'k' })
+  assert.deepEqual(loading, { lastKey: 'k', applyRepo: null })
+  // Resolved with no repo: pane stays put, and returning to the earlier chat applies again.
+  const none = repoFollowStep({ sessionId: 'b', cwd: '/q', sessionRepo: undefined, resolved: true, lastKey: 'k' })
+  assert.deepEqual(none, { lastKey: null, applyRepo: null })
+  const back = repoFollowStep({ sessionId: 'a', cwd: '/p', sessionRepo: 'acme/app', resolved: true, lastKey: none.lastKey })
+  assert.equal(back.applyRepo, 'acme/app')
+})
