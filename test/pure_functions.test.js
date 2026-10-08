@@ -88,6 +88,11 @@ import {
   isMissingCommandError,
   sortListItems,
   matchesMilestone,
+  normalizeMergeDefaults,
+  markReadyPlan,
+  quickMergePlan,
+  isListMergeConflict,
+  quickMergeEligible,
 } from '../desktop/plugin.js'
 
 test('Issue #13: labelTextColor chooses high-contrast text color based on luminance', () => {
@@ -1441,6 +1446,67 @@ test('normalizeActionDefaults tolerates a missing or malformed stored value', ()
   assert.deepEqual(normalizeActionDefaults(undefined), { issue: null, pr: null })
   assert.deepEqual(normalizeActionDefaults([1, 2]), { issue: null, pr: null })
   assert.deepEqual(normalizeActionDefaults({ issue: 'triage', pr: '  ' }), { issue: 'triage', pr: null })
+})
+
+test('normalizeMergeDefaults tolerates a missing/malformed stored value and gates method to a known enum', () => {
+  assert.deepEqual(normalizeMergeDefaults(undefined), { method: 'squash', deleteBranch: false })
+  assert.deepEqual(normalizeMergeDefaults(null), { method: 'squash', deleteBranch: false })
+  assert.deepEqual(normalizeMergeDefaults([1, 2]), { method: 'squash', deleteBranch: false })
+  assert.deepEqual(normalizeMergeDefaults({ method: 'bogus', deleteBranch: true }), { method: 'squash', deleteBranch: true })
+  assert.deepEqual(normalizeMergeDefaults({ method: 'rebase', deleteBranch: true }), { method: 'rebase', deleteBranch: true })
+  assert.deepEqual(normalizeMergeDefaults({ method: 'merge' }), { method: 'merge', deleteBranch: false })
+})
+
+test('markReadyPlan confirms and invalidates the header + list queries', () => {
+  const plan = markReadyPlan('o/r', 42)
+  assert.equal(plan.confirm, 'Mark PR #42 in o/r as ready for review?')
+  assert.deepEqual(plan.invalidate, [
+    ['gh-actions-pane', 'pr-page', 'o/r', '42'],
+    ['gh-actions-pane', 'prs', 'o/r'],
+  ])
+})
+
+test('quickMergePlan confirms and invalidates the same keys as the full merge flow', () => {
+  const plan = quickMergePlan('o/r', 42)
+  assert.equal(plan.confirm, 'Squash and merge PR #42 in o/r, then delete the branch?')
+  assert.deepEqual(plan.invalidate, [
+    ['gh-actions-pane', 'pr-page', 'o/r', '42'],
+    ['gh-actions-pane', 'pr-checks', 'o/r', '42'],
+    ['gh-actions-pane', 'prs', 'o/r'],
+    ['gh-actions-pane', 'session-git'],
+  ])
+})
+
+test('isListMergeConflict only flags the GraphQL CONFLICTING enum', () => {
+  assert.equal(isListMergeConflict('CONFLICTING'), true)
+  assert.equal(isListMergeConflict('MERGEABLE'), false)
+  assert.equal(isListMergeConflict('UNKNOWN'), false)
+  assert.equal(isListMergeConflict(null), false)
+  assert.equal(isListMergeConflict(undefined), false)
+})
+
+test('quickMergeEligible requires out-of-draft, non-failing CI and no conflict', () => {
+  assert.equal(quickMergeEligible({ isDraft: false, ciStatus: 'ok', conflicted: false }), true)
+  // No CI configured at all still counts as eligible (#23 parity).
+  assert.equal(quickMergeEligible({ isDraft: false, ciStatus: 'none', conflicted: false }), true)
+  assert.equal(quickMergeEligible({ isDraft: true, ciStatus: 'ok', conflicted: false }), false)
+  assert.equal(quickMergeEligible({ isDraft: false, ciStatus: 'failing', conflicted: false }), false)
+  assert.equal(quickMergeEligible({ isDraft: false, ciStatus: 'ok', conflicted: true }), false)
+})
+
+test('normalizeAction defaults requiresConflict to false and preserves it when set', () => {
+  const plain = normalizeAction({ id: 'x', title: 'X', command: 'x' })
+  assert.equal(plain.requiresConflict, false)
+  const gated = normalizeAction({ id: 'y', title: 'Y', command: 'y', requiresConflict: true })
+  assert.equal(gated.requiresConflict, true)
+})
+
+test('DEFAULT_ACTIONS includes a PR-only, conflict-gated "Resolve conflicts" action', () => {
+  const action = DEFAULT_ACTIONS.find(a => a.id === 'resolve-conflicts')
+  assert.ok(action, 'resolve-conflicts must be a built-in action')
+  assert.deepEqual(action.appliesTo, ['pr'])
+  assert.equal(action.requiresConflict, true)
+  assert.equal(action.command, 'resolving-merge-conflicts')
 })
 
 test('matchLabelRule: first matching label wins, case-insensitively', () => {

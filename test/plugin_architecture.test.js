@@ -59,7 +59,7 @@ test('Issue #29: timeline assembly is memoized before detail early returns', () 
 })
 
 test('Issue #31: pane and page wire the shared list keyboard flow', () => {
-  assert.equal((source.match(/const keyboard = useListKeyboardFlow\(query\)/g) || []).length, 2)
+  assert.equal((source.match(/const keyboard = useListKeyboardFlow\(query, tab\)/g) || []).length, 2)
   assert.equal((source.match(/onKeyDown: keyboard\.onKeyDown/g) || []).length, 2)
   assert.equal((source.match(/inputRef: keyboard\.searchRef/g) || []).length, 2)
 })
@@ -68,15 +68,17 @@ test('Issue #30: list filter tokens keep row and token actions separate', () => 
   const lists = source.slice(source.indexOf('function PrList'), source.indexOf('function DetailToolbar'))
   assert.equal((lists.match(/jsxs\('div', \{\n\s+onClick: \(\) => onOpen\(/g) || []).length, 2)
   assert.equal((lists.match(/className: 'gh-row-open/g) || []).length, 2)
-  assert.ok(lists.includes("setListFilter(event, 'author', pr.author?.login)"))
-  assert.ok(lists.includes("setListFilter(event, 'label', l.name)"))
+  assert.ok(lists.includes("setListFilter(event, 'prs', 'author', pr.author?.login)"))
+  assert.ok(lists.includes("setListFilter(event, 'prs', 'label', l.name)"))
+  assert.ok(lists.includes("setListFilter(event, 'issues', 'author', it.author?.login)"))
+  assert.ok(lists.includes("setListFilter(event, 'issues', 'label', l.name)"))
 })
 
 test('List filters fetch and expose the same author/label scopes', () => {
   const lists = source.slice(source.indexOf('function PrList'), source.indexOf('function DetailToolbar'))
   assert.ok(lists.includes('reviewDecision,statusCheckRollup,labels,milestone --jq'))
-  assert.equal((lists.match(/setListFilter\(event, 'author'/g) || []).length, 2)
-  assert.equal((lists.match(/setListFilter\(event, 'label'/g) || []).length, 2)
+  assert.equal((lists.match(/setListFilter\(event, '(?:prs|issues)', 'author'/g) || []).length, 2)
+  assert.equal((lists.match(/setListFilter\(event, '(?:prs|issues)', 'label'/g) || []).length, 2)
 })
 
 test('Issue #33: checkout copy action is wired only to loaded PR details', () => {
@@ -91,7 +93,7 @@ test('Assign to a Bot is wired on loaded PR and issue details', () => {
   const assign = source.slice(source.indexOf('function AssignToBot'), source.indexOf('function DetailToolbar'))
   assert.ok(source.includes('function AssignToBot({ kind, repo, number })'))
   assert.ok(toolbar.includes('jsx(AssignToBot, { kind, repo, number })'))
-  assert.ok(source.includes("title: d.title, kind: 'pr', checkoutCommand"))
+  assert.ok(source.includes("title: d.title, kind: 'pr', mergeableState: d.mergeable_state, checkoutCommand"))
   // issue detail now also threads its labels through so the Action button can
   // resolve a label rule; the literal call site grew accordingly.
   assert.ok(source.includes("title: d.title, kind: 'issue', labels: d.labels, onBack"))
@@ -211,7 +213,7 @@ test('Actions (generic Implement/Triage/etc) are wired on the issue list and the
 
   // Issue detail AND PR detail both offer the Action button now (Triage/Review
   // apply to PRs too); only the bot assign stays kind-gated separately.
-  assert.ok(toolbar.includes("(kind === 'issue' || kind === 'pr') ? jsx(ActionButton, { repo, numbers: [number], kind, labels }) : null"))
+  assert.ok(toolbar.includes("(kind === 'issue' || kind === 'pr') ? jsx(ActionButton, { repo, numbers: [number], kind, labels, mergeableState }) : null"))
 
   // List: checkbox selection + action bar, and selecting must not navigate.
   assert.ok(issues.includes("type: 'checkbox'"), 'rows need a selection checkbox')
@@ -492,5 +494,6 @@ test('Cross-repo session-PR navigation keeps the just-set selection', () => {
   assert.ok(status.includes('navigateToSessionPr(pr.repo, pr.number)'), 'status click must route through the shared navigation')
   assert.ok(banner.includes('navigateToSessionPr(pr.repo, pr.number)'), 'banner click must route through the shared navigation')
   assert.ok(shell.includes('if (suppressRepoResetFor !== repo) { $selPr.set(null); $selIssue.set(null) }'), 'repo reset must match the navigation target, never consume a boolean')
-  assert.ok(shell.includes("$listQuery.set('')"), 'the shared filter resets on every repo change, navigation included')
+  assert.ok(shell.includes("$prListQuery.set('')"), 'the per-kind filter resets on every repo change, navigation included')
+  assert.ok(shell.includes("$issueListQuery.set('')"), 'the per-kind filter resets on every repo change, navigation included')
 })

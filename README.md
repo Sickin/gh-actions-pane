@@ -20,17 +20,19 @@ A single-file desktop plugin (`@hermes/plugin-sdk`) that shows your repository's
 
 ## Features
 
-- **PR list** — state pills, `+N / −N`, relative timestamps, **CI** (`passing / pending / failing`) and **review** (`approved / changes / required`) chips, exact `#N` search (`#42` does not match `#142`)
+- **PR list / Issue list** — independent search text and standing filters (assignee/labels/milestone/sort) per kind, so switching tabs never carries the other kind's filter along; state pills, `+N / −N`, relative timestamps, **CI** (`passing / pending / failing`) and **review** (`approved / changes / required`) chips, exact `#N` search (`#42` does not match `#142`)
 - **Session chip + repo picker** — PR for the active session branch (same join as the core review pane); 32px pill with `https://github.com/{owner}.png` avatar
-- **PR / Issue header** — kicker, grouped meta chips, title glued to `#`, **Merge** action on open PRs (`squash / merge / rebase`, optional delete-branch, `GH_PROMPT_DISABLED=1`)
+- **PR / Issue header** — kicker, grouped meta chips, title glued to `#`, **Merge** action on open PRs (`squash / merge / rebase`, optional delete-branch, `GH_PROMPT_DISABLED=1`) — method and delete-branch default to whatever you last confirmed, set from the gear icon's Merge defaults
+- **PR quick actions** — a single-click default button next to the header (and a two-tap row icon on the list) that follows PR state: **Mark ready** while the PR is a draft, **Squash & merge** (with delete-branch) once it's open, CI isn't failing, and GitHub reports no conflict. The full Merge control (method picker) always stays available underneath for anything other than squash+delete
 - **Conversation** — `gh-timeline` rail, GFM subset (quotes, task lists, tables, `<details>`, strikethrough; raw HTML stripped), icon-only Quote → active composer, compact checks strip (`Blocked` / `Waiting` / `All passed`)
 - **Inline review threads** — `file:line` chip (`original_line` fallback), collapsed diff hunk, replies grouped by `in_reply_to_id`
 - **Jump to latest** — floating control on the Radix viewport only (nested code/table scrollers ignored); remeasures when the detail DOM mounts
 - **Commits** — same rail; each row is a `<details>` with lazy-loaded body / `+−` / files; SHA + external link do not toggle
 - **Files** — unified hunks per file, line numbers, theme diff colors, `A/D/M/R` badge; unboxed header, border on the diff body
 - **Issues** — label chips in the label's own color, black/white text via W3C relative luminance
-- **Actions** — user-editable named prompts (Implement, Triage, Diagnose, or your own) run against one issue/PR from its row, in bulk from the list selection, or from the detail toolbar. A split button runs the *resolved* action on click; the chevron offers every other action scoped to that item kind
-- **Label routing** — ordered rules map a GitHub label to an action (e.g. `ready-for-agent` → Implement, `bug` → Diagnose); the first matching label wins, falling back to a per-kind default (Issues / PRs) when nothing matches. Manage actions, rules, and defaults from the gear icon in the pane/page header
+- **Actions** — user-editable named prompts (Implement, Triage, Diagnose, Resolve conflicts, or your own) run against one issue/PR from its row, in bulk from the list selection, or from the detail toolbar. A split button runs the *resolved* action on click; the chevron offers every other action scoped to that item kind. **Resolve conflicts** only ever appears on a PR GitHub reports as conflicted (`mergeable_state: dirty`) — never a live option on a clean PR
+- **Label routing** — ordered rules map a GitHub label to an action (e.g. `ready-for-agent` → Implement, `bug` → Diagnose); the first matching label wins, falling back to a per-kind default (Issues / PRs) when nothing matches. Manage actions, rules, defaults, and merge defaults from the gear icon in the pane/page header
+- **Kanban linking** — issue actions (Implement/Triage/Diagnose) create or reuse a `hermes kanban` task for that issue (one board per repo by default, or one shared board — pick in the gear icon). A badge next to the repo picker names the board linked to the current repo and its task count, with a tooltip explaining the routing; click opens the Kanban view if one is installed. The badge still shows a (muted) board name before any action has run, since the board is created lazily on first use
 - **Theme** — field surfaces on `--ui-editor-surface-background` (matte/glass inherited from Desktop); cards on `--ui-bg-quaternary`; container queries at `<360` / `<300` / `<240`
 
 ## Requirements
